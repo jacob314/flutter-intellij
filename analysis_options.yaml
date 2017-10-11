@@ -1,0 +1,14 @@
+analyzer:
+  strong-mode: true
+  exclude:
+    - 'doc/**'
+    - 'lib/templates/*.html'
+    - 'pub.dartlang.org/**'
+    - 'testing/**'
+linter:
+  rules:
+    - avoid_init_to_null
+    - directives_ordering
+    - no_adjacent_strings_in_list
+    - package_api_docs
+    - slash_for_doc_comments

@@ -14,6 +14,7 @@ api() {
   String imports = run(
     'git',
     // Note: extra quotes added so grep doesn't match this file.
+    // ignore: no_adjacent_strings_in_list
     arguments: ['grep', 'import com.jetbrains.' 'lang.dart.'],
     quiet: true,
   );
@@ -23,10 +24,7 @@ api() {
   Map<String, List<String>> usages = {};
 
   imports.split('\n').forEach((String line) {
-    if (line
-        .trim()
-        .isEmpty)
-      return;
+    if (line.trim().isEmpty) return;
 
     int index = line.indexOf(':');
     String place = line.substring(0, index);
