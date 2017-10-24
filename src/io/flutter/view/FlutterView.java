@@ -57,6 +57,9 @@ public class FlutterView implements PersistentStateComponent<FlutterView.State>,
   @Nullable
   FlutterApp app;
 
+  private MemoryView memoryView;
+  private FpsView fpsView;
+
   public FlutterView(@NotNull Project project) {
     myProject = project;
   }
@@ -104,6 +107,13 @@ public class FlutterView implements PersistentStateComponent<FlutterView.State>,
     final ContentManager contentManager = toolWindow.getContentManager();
     contentManager.addContent(toolContent);
     contentManager.setSelectedContent(toolContent);
+
+    final JPanel bottomPanel = new JPanel(new BorderLayout());
+    fpsView = new FpsView();
+    bottomPanel.add(BorderLayout.NORTH, fpsView);
+    memoryView = new MemoryView();
+    bottomPanel.add(BorderLayout.SOUTH, memoryView);
+    mainContent.add(BorderLayout.SOUTH, bottomPanel);
   }
 
   /**
@@ -111,6 +121,9 @@ public class FlutterView implements PersistentStateComponent<FlutterView.State>,
    */
   public void debugActive(@NotNull FlutterViewMessages.FlutterDebugEvent event) {
     this.app = event.app;
+
+    fpsView.debugActive(app, event.vmService);
+    memoryView.debugActive(app, event.vmService);
 
     event.vmService.addVmServiceListener(new VmServiceListener() {
       @Override
@@ -125,6 +138,8 @@ public class FlutterView implements PersistentStateComponent<FlutterView.State>,
       public void connectionClosed() {
         FlutterView.this.app = null;
         updateIcon();
+        fpsView.connectionClosed();
+        memoryView.connectionClosed();
       }
     });
 
