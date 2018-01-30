@@ -8,7 +8,6 @@ package io.flutter.view;
 import com.google.common.base.Joiner;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.*;
-import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.ui.Splitter;
 import com.intellij.openapi.util.Computable;
@@ -30,6 +29,7 @@ import io.flutter.inspector.*;
 import io.flutter.pub.PubRoot;
 import io.flutter.pub.PubRoots;
 import io.flutter.run.daemon.FlutterApp;
+import io.flutter.utils.AsyncRateLimiter;
 import io.flutter.utils.ColorIconMaker;
 import org.dartlang.vm.service.element.InstanceRef;
 import org.jetbrains.annotations.NotNull;
@@ -51,16 +51,29 @@ import java.beans.PropertyChangeListener;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static io.flutter.utils.AsyncUtils.whenCompleteUiThread;
 
 // TODO(devoncarew): Should we filter out the CheckedModeBanner node type?
 // TODO(devoncarew): Should we filter out the WidgetInspector node type?
 
 public class InspectorPanel extends JPanel implements Disposable, InspectorService.InspectorServiceClient {
+
+  // TODO(jacobr): use a lower frame rate when the panel is hidden.
+  /**
+   * Maximum frame rate to refresh the inspector panel at to avoid taxing the
+   * physical device with too many requests to recompute properties and trees.
+   * <p>
+   * A value up to around 30 frames per second could be reasonable for
+   * debugging highly interactive cases particularly when the user is on a
+   * simulator or high powered native device. The frame rate is set low
+   * for now mainly to minimize the risk of unintended consequences.
+   */
+  public static final double REFRESH_FRAMES_PER_SECOND = 5.0;
+
   private final TreeDataProvider myRootsTree;
   private final PropertiesPanel myPropertiesPanel;
   private final Computable<Boolean> isApplicable;
@@ -85,11 +98,16 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   private boolean myIsListening = false;
   private boolean isActive = false;
 
-  private boolean refreshScheduled = false;
-  private Timer refreshTimer;
   private List<PubRoot> pubRoots;
 
+  final AsyncRateLimiter refreshRateLimiter;
+
   private static final Logger LOG = Logger.getInstance(InspectorPanel.class);
+
+  private CompletableFuture<?> refresh() {
+    // TODO(jacobr): refresh the tree as well as just the properties.
+    return myPropertiesPanel.refresh();
+  }
 
   public InspectorPanel(FlutterView flutterView,
                         Computable<Boolean> isApplicable,
@@ -98,6 +116,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     this.treeType = treeType;
     this.flutterView = flutterView;
     this.isApplicable = isApplicable;
+
+    refreshRateLimiter = new AsyncRateLimiter(REFRESH_FRAMES_PER_SECOND, this::refresh);
 
     myRootsTree = new TreeDataProvider(new DefaultMutableTreeNode(null), treeType.displayName);
     myRootsTree.addTreeExpansionListener(new MyTreeExpansionListener());
@@ -173,7 +193,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     // TODO(jacobr): where is the right place to be caching the pub roots.
     if (flutterView != null && flutterView.getFlutterApp() != null) {
       pubRoots = PubRoots.forProject(flutterView.getFlutterApp().getProject());
-    } else {
+    }
+    else {
       pubRoots = null;
     }
 
@@ -188,7 +209,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     getInspectorService().addClient(this);
     getInspectorService().isWidgetTreeReady().thenAccept((Boolean ready) -> {
       if (ready) {
-        onFlutterFrame();
+        recomputeTreeRoot();
       }
     });
   }
@@ -197,14 +218,12 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return (DefaultMutableTreeNode)getTreeModel().getRoot();
   }
 
-  void recomputeTreeRoot() {
-    if (getRootNode().getUserObject() instanceof DiagnosticsNode) {
-      // May be stale but at least we have something.
-      // TODO(jacobr): actually recompute the tree root in this case.
-      return;
-    }
+  private CompletableFuture<DiagnosticsNode> recomputeTreeRoot() {
     if (rootFuture != null && !rootFuture.isDone()) {
-      return;
+      // TODO(jacobr): we should really recompute the tree root in this case
+      // but we need to cleanup some code to do it efficiently enough to enable
+      // without regressing performance.
+      return rootFuture;
     }
     rootFuture = getInspectorService().getRoot(treeType);
 
@@ -218,6 +237,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       maybeLoadChildren(rootNode);
       getTreeModel().setRoot(rootNode);
     });
+    return rootFuture;
   }
 
   void setupTreeNode(DefaultMutableTreeNode node, DiagnosticsNode diagnosticsNode) {
@@ -269,34 +289,21 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
   }
 
-  /**
-   * Helper to get the value of a future on the UI thread.
-   * <p>
-   * The action will never be called if the future is cancelled.
-   */
-  public static <T> void whenCompleteUiThread(CompletableFuture<T> future, BiConsumer<? super T, ? super Throwable> action) {
-    future.whenCompleteAsync(
-      (T value, Throwable throwable) -> {
-        // Exceptions due to the Future being cancelled need to be treated
-        // differently as they indicate that no work should be done rather
-        // than that an error occurred.
-        // By convention we cancel Futures when the value to be computed
-        // would be obsolete. For example, the Future may be for a value from
-        // a previous Dart isolate or the user has already navigated somewhere
-        // else.
-        if (throwable instanceof CancellationException) {
-          return;
-        }
-        ApplicationManager.getApplication().invokeLater(() -> action.accept(value, throwable));
-      }
-    );
-  }
-
   public void onFlutterFrame() {
-    recomputeTreeRoot();
+    if (rootFuture == null) {
+      // This was the first frame.
+      recomputeTreeRoot();
+    }
+    refreshRateLimiter.scheduleRequest();
   }
 
   private boolean identicalDiagnosticsNodes(DiagnosticsNode a, DiagnosticsNode b) {
+    if (a == b) {
+      return true;
+    }
+    if (a == null || b == null) {
+      return false;
+    }
     return a.getDartDiagnosticRef().equals(b.getDartDiagnosticRef());
   }
 
@@ -427,7 +434,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         final DiagnosticsNode diagnostic = (DiagnosticsNode)userObject;
         if (diagnostic != null) {
           if (isCreatedByLocalProject(diagnostic)) {
-            diagnostic.getCreationLocation().getXSourcePosition().createNavigatable(flutterView.getFlutterApp().getProject()).navigate(false);
+            diagnostic.getCreationLocation().getXSourcePosition().createNavigatable(flutterView.getFlutterApp().getProject())
+              .navigate(false);
           }
         }
         myPropertiesPanel.showProperties(diagnostic);
@@ -546,6 +554,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   }
 
   private static class PropertiesPanel extends TreeTableView {
+    private DiagnosticsNode diagnostic;
+    private ArrayList<DiagnosticsNode> cachedProperties;
+
     PropertiesPanel() {
       super(new ListTreeTableModelOnColumns(
         new DefaultMutableTreeNode(),
@@ -571,55 +582,108 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
 
     public void showProperties(DiagnosticsNode diagnostic) {
-      // Temporarily clear.
-      getTreeModel().setRoot(new DefaultMutableTreeNode());
+      this.diagnostic = diagnostic;
 
       if (diagnostic == null) {
         getEmptyText().setText(FlutterBundle.message("app.inspector.nothing_to_show"));
+        getTreeModel().setRoot(new DefaultMutableTreeNode());
         return;
       }
       getEmptyText().setText(FlutterBundle.message("app.inspector.loading_properties"));
       whenCompleteUiThread(diagnostic.getProperties(), (ArrayList<DiagnosticsNode> properties, Throwable throwable) -> {
         if (throwable != null) {
+          getTreeModel().setRoot(new DefaultMutableTreeNode());
           getEmptyText().setText(FlutterBundle.message("app.inspector.error_loading_properties"));
           LOG.error(throwable);
           return;
         }
+        showPropertiesHelper(properties);
+      });
+    }
 
-        if (properties.size() == 0) {
-          getEmptyText().setText(FlutterBundle.message("app.inspector.no_properties"));
+    private void showPropertiesHelper(ArrayList<DiagnosticsNode> properties) {
+      cachedProperties = properties;
+      if (properties.size() == 0) {
+        getTreeModel().setRoot(new DefaultMutableTreeNode());
+        getEmptyText().setText(FlutterBundle.message("app.inspector.no_properties"));
+        return;
+      }
+      CompletableFuture<Void> loaded = loadPropertyMetadata(properties);
+
+      whenCompleteUiThread(loaded, (Void ignored, Throwable errorGettingInstances) -> {
+        if (errorGettingInstances != null) {
+          // TODO(jacobr): show error message explaining properties could not
+          // be loaded.
+          getTreeModel().setRoot(new DefaultMutableTreeNode());
+          LOG.error(errorGettingInstances);
+          getEmptyText().setText(FlutterBundle.message("app.inspector.error_loading_property_details"));
           return;
         }
-
-        // Preload all information we need about each property before instantiating
-        // the UI so that the property display UI does not have to deal with values
-        // that are not yet available. As the number of properties is small this is
-        // a reasonable tradeoff.
-        final CompletableFuture[] futures = new CompletableFuture[properties.size()];
-        int i = 0;
-        for (DiagnosticsNode property : properties) {
-          futures[i] = property.getValueProperties();
-          ++i;
-        }
-        whenCompleteUiThread(CompletableFuture.allOf(futures), (Void ignored, Throwable errorGettingInstances) -> {
-          if (errorGettingInstances != null) {
-            // TODO(jacobr): show error message explaining properties could not be loaded.
-            LOG.error(errorGettingInstances);
-            getEmptyText().setText(FlutterBundle.message("app.inspector.error_loading_property_details"));
-            return;
-          }
-
-          final ListTreeTableModelOnColumns model = getTreeModel();
-          final DefaultMutableTreeNode root = new DefaultMutableTreeNode();
-          for (DiagnosticsNode property : properties) {
-            if (property.getLevel() != DiagnosticLevel.hidden) {
-              root.add(new DefaultMutableTreeNode(property));
-            }
-          }
-          getEmptyText().setText(FlutterBundle.message("app.inspector.all_properties_hidden"));
-          model.setRoot(root);
-        });
+        setModelFromProperties(properties);
       });
+    }
+
+    private void setModelFromProperties(ArrayList<DiagnosticsNode> properties) {
+      final ListTreeTableModelOnColumns model = getTreeModel();
+      final DefaultMutableTreeNode root = new DefaultMutableTreeNode();
+      for (DiagnosticsNode property : properties) {
+        if (property.getLevel() != DiagnosticLevel.hidden) {
+          root.add(new DefaultMutableTreeNode(property));
+        }
+      }
+      getEmptyText().setText(FlutterBundle.message("app.inspector.all_properties_hidden"));
+      model.setRoot(root);
+    }
+
+    private CompletableFuture<Void> loadPropertyMetadata(List<DiagnosticsNode> properties) {
+      // Preload all information we need about each property before instantiating
+      // the UI so that the property display UI does not have to deal with values
+      // that are not yet available. As the number of properties is small this is
+      // a reasonable tradeoff.
+      final CompletableFuture[] futures = new CompletableFuture[properties.size()];
+      int i = 0;
+      for (DiagnosticsNode property : properties) {
+        futures[i] = property.getValueProperties();
+        ++i;
+      }
+      return CompletableFuture.allOf(futures);
+    }
+
+    private CompletableFuture<?> refresh() {
+      if (diagnostic == null) {
+        final CompletableFuture<Void> refreshComplete = new CompletableFuture<>();
+        refreshComplete.complete(null);
+        return refreshComplete;
+      }
+      CompletableFuture<ArrayList<DiagnosticsNode>> propertiesFuture = diagnostic.getProperties();
+      whenCompleteUiThread(propertiesFuture, (ArrayList<DiagnosticsNode> properties, Throwable throwable) -> {
+        if (throwable != null) {
+          return;
+        }
+        if (propertiesIdentical(properties, cachedProperties)) {
+          return;
+        }
+        showPropertiesHelper(properties);
+      });
+      return propertiesFuture;
+    }
+
+    private boolean propertiesIdentical(ArrayList<DiagnosticsNode> a, ArrayList<DiagnosticsNode> b) {
+      if (a == b) {
+        return true;
+      }
+      if (a == null || b == null) {
+        return false;
+      }
+      if (a.size() != b.size()) {
+        return false;
+      }
+      for (int i = 0; i < a.size(); ++i) {
+        if (!a.get(i).identicalDisplay(b.get(i))) {
+          return false;
+        }
+      }
+      return true;
     }
   }
 
@@ -673,11 +737,6 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       if (value == null) return;
       final DiagnosticsNode node = (DiagnosticsNode)value;
       final SimpleTextAttributes textAttributes = textAttributesForLevel(node.getLevel());
-
-      if (!node.getShowName()) {
-        append(node.getName(), textAttributes);
-        append(" ", textAttributes);
-      }
 
       boolean appendDescription = true;
 
@@ -785,7 +844,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       }
 
       if (isCreatedByLocalProject(node)) {
-        textAttributes = textAttributes.derive(SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES.getStyle(), null, null,null);
+        textAttributes = textAttributes.derive(SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES.getStyle(), null, null, null);
       }
 
       // TODO(jacobr): custom display for units, colors, iterables, and icons.
