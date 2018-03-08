@@ -9,7 +9,6 @@ import com.google.common.base.Joiner;
 import com.google.gson.*;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.xdebugger.XSourcePosition;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.VmServiceConsumers;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
@@ -30,10 +29,6 @@ import java.util.concurrent.CompletableFuture;
 public class InspectorService implements Disposable {
   private static int nextGroupId = 0;
 
-  /**
-   * Group name to to manage keeping alive nodes in the tree referenced by the inspector.
-   */
-  private final String groupName;
   @NotNull private final FlutterApp app;
   @NotNull private final FlutterDebugProcess debugProcess;
   @NotNull private final VmService vmService;
@@ -93,8 +88,6 @@ public class InspectorService implements Disposable {
     this.isDaemonApiSupported = hasServiceMethod("initServiceExtensions");
 
     clients = new HashSet<>();
-    groupName = "intellij_inspector_" + nextGroupId;
-    nextGroupId++;
 
     vmService.addVmServiceListener(new VmServiceListenerAdapter() {
       @Override
@@ -111,6 +104,23 @@ public class InspectorService implements Disposable {
     vmService.streamListen(VmService.EXTENSION_STREAM_ID, VmServiceConsumers.EMPTY_SUCCESS_CONSUMER);
   }
 
+  @Override()
+  public void dispose() {
+    // TODO(jacobr): dispose everything that needs to be disposed of.
+  }
+
+  public boolean isDetailsSummaryViewSupported() {
+    return hasServiceMethod("getSelectedLocalWidget");
+  }
+
+  /**
+   * Use this method to write code that is backwards compatible with versions
+   * of Flutter that are too old to contain specific service methods.
+   */
+  private boolean hasServiceMethod(String methodName) {
+    return supportedServiceMethods.contains(methodName);
+  }
+
   @NotNull
   public FlutterDebugProcess getDebugProcess() {
     return debugProcess;
@@ -120,34 +130,8 @@ public class InspectorService implements Disposable {
     return debugProcess.getApp();
   }
 
-  public CompletableFuture<XSourcePosition> getPropertyLocation(InstanceRef instanceRef, String name) {
-    return getInstance(instanceRef).thenComposeAsync((Instance instance) -> getPropertyLocationHelper(instance.getClassRef(), name));
-  }
-
-  public CompletableFuture<XSourcePosition> getPropertyLocationHelper(ClassRef classRef, String name) {
-    return inspectorLibrary.getClass(classRef).thenComposeAsync((ClassObj clazz) -> {
-      for (FuncRef f : clazz.getFunctions()) {
-        // TODO(pq): check for private properties that match name.
-        if (f.getName().equals(name)) {
-          return inspectorLibrary.getFunc(f).thenComposeAsync((Func func) -> {
-            final SourceLocation location = func.getLocation();
-            return inspectorLibrary.getSourcePosition(debugProcess, location.getScript(), location.getTokenPos());
-          });
-        }
-      }
-      final ClassRef superClass = clazz.getSuperClass();
-      return superClass == null ? CompletableFuture.completedFuture(null) : getPropertyLocationHelper(superClass, name);
-    });
-  }
-
-  public CompletableFuture<DiagnosticsNode> getRoot(FlutterTreeType type) {
-    switch (type) {
-      case widget:
-        return getRootWidget();
-      case renderObject:
-        return getRootRenderObject();
-    }
-    throw new RuntimeException("Unexpected FlutterTreeType");
+  public ObjectGroup createObjectGroup() {
+    return new ObjectGroup();
   }
 
   private EvalOnDartLibrary getInspectorLibrary() {
@@ -162,8 +146,119 @@ public class InspectorService implements Disposable {
     return inspectorLibrary;
   }
 
+  private void maybeDisposeInspectorLibrary() {
+    if (inspectorLibrary != null) {
+      inspectorLibrary.dispose();
+      inspectorLibrary = null;
+    }
+  }
+
+  private void onVmServiceReceived(String streamId, Event event) {
+    switch (streamId) {
+      case VmService.ISOLATE_STREAM_ID:
+        if (event.getKind() == EventKind.IsolateStart) {
+          maybeDisposeInspectorLibrary();
+        }
+        else if (event.getKind() == EventKind.IsolateExit) {
+          maybeDisposeInspectorLibrary();
+          ApplicationManager.getApplication().invokeLater(() -> {
+            for (InspectorServiceClient client : clients) {
+              client.onIsolateStopped();
+            }
+          });
+        }
+        break;
+
+      case VmService.DEBUG_STREAM_ID: {
+        if (event.getKind() == EventKind.Inspect) {
+          // Make sure the WidgetInspector on the device switches to show the inspected object
+          // if the inspected object is a Widget or RenderObject.
+          createObjectGroup().setSelection(event.getInspectee(), true);
+          // Update the UI in IntelliJ.
+          notifySelectionChanged();
+        }
+        break;
+      }
+      case VmService.EXTENSION_STREAM_ID: {
+        if ("Flutter.Frame".equals(event.getExtensionKind())) {
+          ApplicationManager.getApplication().invokeLater(() -> {
+            for (InspectorServiceClient client : clients) {
+              client.onFlutterFrame();
+            }
+          });
+        }
+        break;
+      }
+      default:
+    }
+  }
+
+  public void forceRefresh() {
+    for (InspectorServiceClient client : clients) {
+      client.onForceRefresh();
+    }
+  }
+
+  private void notifySelectionChanged() {
+    ApplicationManager.getApplication().invokeLater(() -> {
+      for (InspectorServiceClient client : clients) {
+        client.onInspectorSelectionChanged();
+      }
+    });
+  }
+
   public void addClient(InspectorServiceClient client) {
     clients.add(client);
+  }
+
+  public class ObjectGroup implements Disposable {
+    /**
+     * Object group all objects in this arena are allocated with.
+     */
+    final String groupName;
+
+    boolean disposed;
+    
+    private ObjectGroup() {
+      this.groupName = "ij_" + nextGroupId;
+      nextGroupId++;
+      disposed = false;
+    }
+
+    @Override
+    public void dispose() {
+      invokeVoidServiceMethod("disposeGroup", groupName);
+      disposed = true;
+    }
+
+    public CompletableFuture<XSourcePosition> getPropertyLocation(InstanceRef instanceRef, String name) {
+      return getInstance(instanceRef).thenComposeAsync((Instance instance) -> getPropertyLocationHelper(instance.getClassRef(), name));
+    }
+
+    public CompletableFuture<XSourcePosition> getPropertyLocationHelper(ClassRef classRef, String name) {
+      return inspectorLibrary.getClass(classRef).thenComposeAsync((ClassObj clazz) -> {
+        for (FuncRef f : clazz.getFunctions()) {
+          // TODO(pq): check for private properties that match name.
+          if (f.getName().equals(name)) {
+            return inspectorLibrary.getFunc(f).thenComposeAsync((Func func) -> {
+              final SourceLocation location = func.getLocation();
+              return inspectorLibrary.getSourcePosition(debugProcess, location.getScript(), location.getTokenPos());
+            });
+          }
+        }
+        final ClassRef superClass = clazz.getSuperClass();
+        return superClass == null ? CompletableFuture.completedFuture(null) : getPropertyLocationHelper(superClass, name);
+      });
+    }
+
+  public CompletableFuture<DiagnosticsNode> getRoot(FlutterTreeType type) {
+    switch (type) {
+      case widget:
+        return getRootWidget();
+      case renderObject:
+        return getRootRenderObject();
+    }
+    throw new RuntimeException("Unexpected FlutterTreeType");
   }
 
   /**
@@ -177,7 +272,11 @@ public class InspectorService implements Disposable {
   // Flutter Beta channel. The feature is expected to have landed in the
   // Flutter dev chanel on March 22, 2018.
   CompletableFuture<InstanceRef> invokeServiceMethodObservatory(String methodName) {
-    return getInspectorLibrary().eval("WidgetInspectorService.instance." + methodName + "(\"" + groupName + "\")", null);
+    return invokeServiceMethodObservatory(methodName, groupName);
+  }
+
+    CompletableFuture<InstanceRef> invokeServiceMethodObservatory(String methodName, String arg1) {
+    return getInspectorLibrary().eval("WidgetInspectorService.instance." + methodName + "(\"" + arg1 + "\")", null);
   }
 
   CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName) {
@@ -355,7 +454,10 @@ public class InspectorService implements Disposable {
   }
 
   DiagnosticsNode parseDiagnosticsNodeHelper(JsonElement jsonElement) {
-    return new DiagnosticsNode(jsonElement.getAsJsonObject(), this);
+    if (jsonElement == null || jsonElement.isJsonNull()) {
+      return null;
+    }
+    return new DiagnosticsNode(jsonElement.getAsJsonObject(), this, false);
   }
 
   /**
@@ -378,7 +480,7 @@ public class InspectorService implements Disposable {
   ArrayList<DiagnosticsNode> parseDiagnosticsNodesHelper(JsonArray jsonArray) {
     final ArrayList<DiagnosticsNode> nodes = new ArrayList<>();
     for (JsonElement element : jsonArray) {
-      nodes.add(new DiagnosticsNode(element.getAsJsonObject(), this));
+      nodes.add(new DiagnosticsNode(element.getAsJsonObject(), this, false));
     }
     return nodes;
   }
@@ -407,8 +509,8 @@ public class InspectorService implements Disposable {
     return jsonFuture.thenApplyAsync((json) -> parseDiagnosticsNodesHelper(json.getAsJsonArray()));
   }
 
-  CompletableFuture<ArrayList<DiagnosticsNode>> getChildren(InspectorInstanceRef instanceRef) {
-    return getListHelper(instanceRef, "getChildren");
+  CompletableFuture<ArrayList<DiagnosticsNode>> getChildren(InspectorInstanceRef instanceRef, boolean summaryTree) {
+    return getListHelper(instanceRef, summaryTree ? "getChildrenSummaryTree" : "getChildrenDetailsSubtree");
   }
 
   CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorInstanceRef instanceRef) {
@@ -428,14 +530,6 @@ public class InspectorService implements Disposable {
     else {
       return invokeServiceMethodObservatory("isWidgetTreeReady").thenApplyAsync((InstanceRef ref) -> "true".equals(ref.getValueAsString()));
     }
-  }
-
-  /**
-   * Use this method to write code that is backwards compatible with versions
-   * of Flutter that are too old to contain specific service methods.
-   */
-  private boolean hasServiceMethod(String methodName) {
-    return supportedServiceMethods.contains(methodName);
   }
 
   private CompletableFuture<ArrayList<DiagnosticsNode>> getListHelper(
@@ -466,17 +560,26 @@ public class InspectorService implements Disposable {
     }
   }
 
-  public CompletableFuture<Void> invokeVoidServiceMethod(String methodName, InspectorInstanceRef ref) {
+  public CompletableFuture<Void> invokeVoidServiceMethod(String methodName, String arg1) {
     if (isDaemonApiSupported) {
-      return invokeServiceMethodDaemon(methodName, ref).thenApply((ignored) -> null);
+      return invokeServiceMethodDaemon(methodName, arg1).thenApply((ignored) -> null);
     }
     else {
-      return invokeServiceMethodObservatory(methodName, ref).thenApply((ignored) -> null);
+      return invokeServiceMethodObservatory(methodName, arg1).thenApply((ignored) -> null);
     }
   }
 
-  public CompletableFuture<DiagnosticsNode> getRootWidget() {
-    return invokeServiceMethodReturningNode("getRootWidget");
+    public CompletableFuture<Void> invokeVoidServiceMethod(String methodName, InspectorInstanceRef ref) {
+      if (isDaemonApiSupported) {
+        return invokeServiceMethodDaemon(methodName, ref).thenApply((ignored) -> null);
+      }
+      else {
+        return invokeServiceMethodObservatory(methodName, ref).thenApply((ignored) -> null);
+      }
+    }
+
+    public CompletableFuture<DiagnosticsNode> getRootWidget() {
+    return invokeServiceMethodReturningNode(isDetailsSummaryViewSupported() ? "getRootWidgetSummaryTree" : "getRootWidget");
   }
 
   public CompletableFuture<DiagnosticsNode> getRootRenderObject() {
@@ -513,81 +616,26 @@ public class InspectorService implements Disposable {
     return pathNodes;
   }
 
-  public CompletableFuture<DiagnosticsNode> getSelection(DiagnosticsNode previousSelection, FlutterTreeType treeType) {
+  public CompletableFuture<DiagnosticsNode> getSelection(DiagnosticsNode previousSelection, FlutterTreeType treeType, boolean localOnly) {
     CompletableFuture<DiagnosticsNode> result = null;
     final InspectorInstanceRef previousSelectionRef = previousSelection != null ? previousSelection.getDartDiagnosticRef() : null;
 
     switch (treeType) {
       case widget:
-        result = invokeServiceMethodReturningNode("getSelectedWidget", previousSelectionRef);
+        result = invokeServiceMethodReturningNode(localOnly ? "getSelectedLocalWidget" : "getSelectedWidget", previousSelectionRef);
         break;
       case renderObject:
         result = invokeServiceMethodReturningNode("getSelectedRenderObject", previousSelectionRef);
         break;
     }
     return result.thenApplyAsync((DiagnosticsNode newSelection) -> {
-      if (newSelection.getDartDiagnosticRef().equals(previousSelectionRef)) {
+      if (newSelection != null && newSelection.getDartDiagnosticRef().equals(previousSelectionRef)) {
         return previousSelection;
       }
       else {
         return newSelection;
       }
     });
-  }
-
-  @Override
-  public void dispose() {
-    // TODO(jacobr): dispose everything that needs to be disposed of.
-  }
-
-  private void disposeInspectorLibrary() {
-    if (inspectorLibrary != null) {
-      inspectorLibrary.dispose();
-      inspectorLibrary = null;
-    }
-  }
-
-  private void onVmServiceReceived(String streamId, Event event) {
-    switch (streamId) {
-      case VmService.ISOLATE_STREAM_ID:
-        if (event.getKind() == EventKind.IsolateExit) {
-          assert app.getPerfService() != null;
-          final IsolateRef flutterIsolate = app.getPerfService().getCurrentFlutterIsolate();
-
-          // Only call disposeInspectorLibrary() if it was the flutter isolate that exited.
-          if (flutterIsolate != null && StringUtil.equals(flutterIsolate.getId(), event.getIsolate().getId())) {
-            disposeInspectorLibrary();
-            ApplicationManager.getApplication().invokeLater(() -> {
-              for (InspectorServiceClient client : clients) {
-                client.onIsolateStopped();
-              }
-            });
-          }
-        }
-        break;
-
-      case VmService.DEBUG_STREAM_ID: {
-        if (event.getKind() == EventKind.Inspect) {
-          // Make sure the WidgetInspector on the device switches to show the inspected object
-          // if the inspected object is a Widget or RenderObject.
-          setSelection(event.getInspectee(), true);
-          // Update the UI in IntelliJ.
-          notifySelectionChanged();
-        }
-        break;
-      }
-      case VmService.EXTENSION_STREAM_ID: {
-        if ("Flutter.Frame".equals(event.getExtensionKind())) {
-          ApplicationManager.getApplication().invokeLater(() -> {
-            for (InspectorServiceClient client : clients) {
-              client.onFlutterFrame();
-            }
-          });
-        }
-        break;
-      }
-      default:
-    }
   }
 
   public void setSelection(InspectorInstanceRef selection, boolean uiAlreadyUpdated) {
@@ -628,19 +676,9 @@ public class InspectorService implements Disposable {
     });
   }
 
-  private void notifySelectionChanged() {
-    ApplicationManager.getApplication().invokeLater(() -> {
-      for (InspectorServiceClient client : clients) {
-        client.onInspectorSelectionChanged();
-      }
-    });
-  }
-
   public CompletableFuture<Map<String, InstanceRef>> getEnumPropertyValues(InspectorInstanceRef ref) {
     if (ref == null || ref.getId() == null) {
-      final CompletableFuture<Map<String, InstanceRef>> ret = new CompletableFuture<>();
-      ret.complete(new HashMap<>());
-      return ret;
+      return CompletableFuture.completedFuture(new HashMap<>());
     }
     return getInstance(toObservatoryInstanceRef(ref))
       .thenComposeAsync((Instance instance) -> getInspectorLibrary().getClass(instance.getClassRef()).thenApplyAsync((ClassObj clazz) -> {
@@ -667,6 +705,18 @@ public class InspectorService implements Disposable {
       }));
   }
 
+  public CompletableFuture<DiagnosticsNode> getDetailsSubtree(DiagnosticsNode node) {
+    if (node == null) {
+      return CompletableFuture.completedFuture(null);
+    }
+    return invokeServiceMethodReturningNode("getDetailsSubtree", node.getDartDiagnosticRef());
+  }
+
+  FlutterApp getApp() {
+    return InspectorService.this.getApp();
+  }
+}
+
   public enum FlutterTreeType {
     widget("Widget"),
     renderObject("Render");
@@ -685,5 +735,7 @@ public class InspectorService implements Disposable {
     void onFlutterFrame();
 
     void onIsolateStopped();
+
+    void onForceRefresh();
   }
 }

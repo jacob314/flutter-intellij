@@ -111,7 +111,7 @@ public class EvalOnDartLibrary implements Disposable {
 
             @Override
             public void received(ErrorRef response) {
-              LOG.error("Error evaluating expression:\n" + response.getMessage());
+              LOG.error("Error evaluating expression:\n" + expression + "\nResponse:" + response.getMessage());
               future.completeExceptionally(new RuntimeException(response.toString()));
             }
 

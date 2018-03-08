@@ -22,6 +22,8 @@ import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.util.ActionCallback;
+import com.intellij.openapi.util.ActiveRunnable;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowManager;
@@ -72,6 +74,7 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
   private static class PerAppState {
     ArrayList<FlutterViewAction> flutterViewActions = new ArrayList<>();
     ArrayList<InspectorPanel> inspectorPanels = new ArrayList<>();
+    JBRunnerTabs tabs;
     Content content;
     boolean sendRestartNotificationOnNextFrame = false;
   }
@@ -103,7 +106,12 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
   @NotNull
   @Override
   public FlutterViewState getState() {
-    return this.state;
+    return state;
+  }
+
+  @NotNull
+  public Project getProject() {
+    return myProject;
   }
 
   @Override
@@ -127,9 +135,13 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     displayEmptyContent(window);
   }
 
-  private DefaultActionGroup createToolbar(@NotNull ToolWindow toolWindow, @NotNull FlutterApp app, Disposable parentDisposable) {
+  private DefaultActionGroup createToolbar(@NotNull ToolWindow toolWindow, @NotNull FlutterApp app, Disposable parentDisposable, InspectorService inspectorService) {
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
     toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
+    if (inspectorService != null) {
+      toolbarGroup.addSeparator();
+      toolbarGroup.add(registerAction(new ForceRefreshAction(app, inspectorService)));
+    }
     toolbarGroup.addSeparator();
     toolbarGroup.add(registerAction(new DebugDrawAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
@@ -183,17 +195,19 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     final PerAppState state = getOrCreateStateForApp(app);
     assert (state.content == null);
     state.content = content;
+    state.tabs = runnerTabs;
 
-    final DefaultActionGroup toolbarGroup = createToolbar(toolWindow, app, runnerTabs);
+    final DefaultActionGroup toolbarGroup = createToolbar(toolWindow, app, runnerTabs, inspectorService);
     toolWindowPanel.setToolbar(ActionManager.getInstance().createActionToolbar("FlutterViewToolbar", toolbarGroup, true).getComponent());
 
     // If the inspector is available (non-profile mode), then show it.
     if (inspectorService != null) {
-      addInspectorPanel("Widgets", runnerTabs, state, InspectorService.FlutterTreeType.widget, app, inspectorService, toolWindow,
-                        toolbarGroup,
-                        true);
-      addInspectorPanel("Render Tree", runnerTabs, state, InspectorService.FlutterTreeType.renderObject, app, inspectorService, toolWindow,
-                        toolbarGroup, false);
+      final boolean useSummaryTree = inspectorService.isDetailsSummaryViewSupported();
+      runnerTabs.setSelectionChangeHandler(this::onTabSelectionChange);
+      addInspectorPanel("Widgets", runnerTabs, state, InspectorService.FlutterTreeType.widget, app, inspectorService, toolWindow, toolbarGroup, true,
+                        useSummaryTree);
+      addInspectorPanel("Render Tree", runnerTabs, state, InspectorService.FlutterTreeType.renderObject, app, inspectorService, toolWindow, toolbarGroup, false,
+                        false);
     }
     else {
       toolbarGroup.add(new OverflowAction(this, app));
@@ -221,6 +235,29 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     }
   }
 
+  private ActionCallback onTabSelectionChange(TabInfo info, boolean requestFocus, @NotNull ActiveRunnable doChangeSelection)  {
+    final InspectorPanel panel = (InspectorPanel)info.getComponent();
+    panel.setVisibleToUser(true);
+    final TabInfo previous = info.getPreviousSelection();
+    if (previous != null) {
+      ((InspectorPanel)previous.getComponent()).setVisibleToUser(false);
+    }
+    return doChangeSelection.run();
+  }
+
+  public void switchToRenderTree(FlutterApp app) {
+    PerAppState state = perAppViewState.get(app);
+    for (TabInfo tabInfo : state.tabs.getTabs()) {
+      if (tabInfo.getComponent() instanceof InspectorPanel) {
+        final InspectorPanel panel = (InspectorPanel) tabInfo.getComponent();
+        if (panel.getTreeType() == InspectorService.FlutterTreeType.renderObject) {
+          state.tabs.select(tabInfo, true);
+          return;
+        }
+      }
+    }
+  }
+
   private void addInspectorPanel(String displayName,
                                  JBRunnerTabs tabs,
                                  PerAppState state,
@@ -229,9 +266,10 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
                                  InspectorService inspectorService,
                                  @NotNull ToolWindow toolWindow,
                                  DefaultActionGroup toolbarGroup,
-                                 boolean selectedTab) {
+                                 boolean selectedTab,
+                                 boolean useSummaryTree) {
     final OverflowAction overflowAction = new OverflowAction(this, flutterApp);
-    final InspectorPanel inspectorPanel = new InspectorPanel(this, flutterApp, inspectorService, flutterApp::isSessionActive, treeType);
+    final InspectorPanel inspectorPanel = new InspectorPanel(this, flutterApp, inspectorService, flutterApp::isSessionActive, treeType, useSummaryTree);
     final TabInfo tabInfo = new TabInfo(inspectorPanel).setActions(toolbarGroup, ActionPlaces.TOOLBAR)
       .append(displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
       .setSideComponent(overflowAction.getActionButton());
@@ -660,6 +698,21 @@ class ToggleInspectModeAction extends FlutterViewToggleableAction {
   public void handleAppRestarted() {
     if (isSelected()) {
       setSelected(null, false);
+    }
+  }
+}
+
+class ForceRefreshAction extends FlutterViewAction {
+  final @NotNull InspectorService inspectorService;
+
+  ForceRefreshAction(@NotNull FlutterApp app, @NotNull InspectorService inspectorService) {
+    super(app, "Force Refresh Action", "For Refresh", AllIcons.Actions.ForceRefresh);
+    this.inspectorService = inspectorService;
+  }
+
+  protected void perform(AnActionEvent event) {
+    if (app.isSessionActive()) {
+      inspectorService.forceRefresh();
     }
   }
 }
