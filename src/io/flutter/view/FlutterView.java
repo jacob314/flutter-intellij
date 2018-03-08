@@ -52,6 +52,8 @@ import java.awt.*;
 import java.util.*;
 import java.util.List;
 
+import static io.flutter.utils.AsyncUtils.whenCompleteUiThread;
+
 // TODO(devoncarew): Display an fps graph.
 
 @com.intellij.openapi.components.State(
@@ -94,7 +96,12 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
   @NotNull
   @Override
   public FlutterViewState getState() {
-    return this.state;
+    return state;
+  }
+
+  @NotNull
+  public Project getProject() {
+    return myProject;
   }
 
   @Override
@@ -121,6 +128,8 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
   private DefaultActionGroup createToolbar(@NotNull ToolWindow toolWindow, @NotNull FlutterApp app, Disposable parentDisposable) {
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
     toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
+    toolbarGroup.addSeparator();
+    toolbarGroup.add(registerAction(new ForceRefreshAction(app)));
     toolbarGroup.addSeparator();
     toolbarGroup.add(registerAction(new DebugDrawAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
@@ -171,8 +180,11 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     final DefaultActionGroup toolbarGroup = createToolbar(toolWindow, app, tabs);
     toolWindowPanel.setToolbar(ActionManager.getInstance().createActionToolbar("FlutterViewToolbar", toolbarGroup, true).getComponent());
 
-    addInspectorPanel("Widgets", tabs, state, InspectorService.FlutterTreeType.widget, app, toolWindow, toolbarGroup, true);
-    addInspectorPanel("Render Tree", tabs, state, InspectorService.FlutterTreeType.renderObject, app, toolWindow, toolbarGroup, false);
+    final boolean useSummaryTree = app.getInspectorService().isDetailsSummaryViewSupported();
+    addInspectorPanel("Widgets", tabs, state, InspectorService.FlutterTreeType.widget, app, toolWindow, toolbarGroup, true,
+                      useSummaryTree);
+    addInspectorPanel("Render Tree", tabs, state, InspectorService.FlutterTreeType.renderObject, app, toolWindow, toolbarGroup, false,
+                      false);
   }
 
   private void addInspectorPanel(String displayName,
@@ -182,9 +194,10 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
                                  FlutterApp flutterApp,
                                  @NotNull ToolWindow toolWindow,
                                  DefaultActionGroup toolbarGroup,
-                                 boolean selectedTab) {
+                                 boolean selectedTab,
+                                 boolean useSummaryTree) {
     final OverflowAction overflowAction = new OverflowAction(this, flutterApp);
-    final InspectorPanel inspectorPanel = new InspectorPanel(this, flutterApp, flutterApp::isSessionActive, treeType);
+    final InspectorPanel inspectorPanel = new InspectorPanel(this, flutterApp, flutterApp::isSessionActive, treeType, useSummaryTree);
     final TabInfo tabInfo = new TabInfo(inspectorPanel).setActions(toolbarGroup, ActionPlaces.TOOLBAR)
       .append(displayName, SimpleTextAttributes.REGULAR_ATTRIBUTES)
       .setSideComponent(overflowAction.getActionButton());
@@ -199,78 +212,81 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
    * Called when a debug connection starts.
    */
   public void debugActive(@NotNull FlutterViewMessages.FlutterDebugEvent event) {
-    if (FlutterSettings.getInstance().isOpenInspectorOnAppLaunch()) {
-      autoActivateToolWindow();
-    }
-
     final FlutterApp app = event.app;
-
-    final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(myProject);
-    if (!(toolWindowManager instanceof ToolWindowManagerEx)) {
-      return;
-    }
-
-    final ToolWindow toolWindow = toolWindowManager.getToolWindow(FlutterView.TOOL_WINDOW_ID);
-    if (toolWindow == null) {
-      return;
-    }
-
-    if (isDisplayingEmptyContent()) {
-      removeEmptyContent(toolWindow);
-    }
-
-    listenForRenderTreeActivations(toolWindow);
-
-    addInspector(app, toolWindow);
-
-    event.vmService.addVmServiceListener(new VmServiceListenerAdapter() {
-      @Override
-      public void connectionOpened() {
-        onAppChanged(app);
+    whenCompleteUiThread(app.getInspectorService().isInspectorServiceReady(), (ready, exception) -> {
+      if (ready == false || exception != null) {
+        return;
+      }
+      if (FlutterSettings.getInstance().isOpenInspectorOnAppLaunch()) {
+        autoActivateToolWindow();
       }
 
-      @Override
-      public void received(String streamId, Event event) {
-        // Note: we depend here on the streamListen("Extension") call in InspectorService.
-        if (StringUtil.equals(streamId, VmService.EXTENSION_STREAM_ID)) {
-          if (StringUtil.equals("Flutter.Frame", event.getExtensionKind())) {
-            handleFlutterFrame(app);
-          }
-        }
+      final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(myProject);
+      if (!(toolWindowManager instanceof ToolWindowManagerEx)) {
+        return;
       }
 
-      @Override
-      public void connectionClosed() {
-        ApplicationManager.getApplication().invokeLater(() -> {
-          final ContentManager contentManager = toolWindow.getContentManager();
+      final ToolWindow toolWindow = toolWindowManager.getToolWindow(FlutterView.TOOL_WINDOW_ID);
+      if (toolWindow == null) {
+        return;
+      }
+
+      if (isDisplayingEmptyContent()) {
+        removeEmptyContent(toolWindow);
+      }
+
+      listenForRenderTreeActivations(toolWindow);
+      addInspector(app, toolWindow);
+
+      event.vmService.addVmServiceListener(new VmServiceListenerAdapter() {
+        @Override
+        public void connectionOpened() {
           onAppChanged(app);
-          final PerAppState state = perAppViewState.remove(app);
-          if (state != null && state.content != null) {
-            contentManager.removeContent(state.content, true);
-          }
-          if (perAppViewState.isEmpty()) {
-            // No more applications are running.
-            displayEmptyContent(toolWindow);
-          }
-        });
-      }
-    });
-
-    onAppChanged(app);
-
-    app.addStateListener(new FlutterApp.FlutterAppListener() {
-      public void notifyAppRestarted() {
-        // When we get a restart finishes, queue up a notification to the flutter view
-        // actions. We don't notify right away because the new isolate can take a little
-        // while to start up. We wait until we get the first frame event, which is
-        // enough of an indication that the isolate and flutter framework are initialized
-        // enough to receive service calls (for example, calls to restore various framework
-        // debugging settings).
-        final PerAppState state = getStateForApp(app);
-        if (state != null) {
-          state.sendRestartNotificationOnNextFrame = true;
         }
-      }
+
+        @Override
+        public void received(String streamId, Event event) {
+          // Note: we depend here on the streamListen("Extension") call in InspectorService.
+          if (StringUtil.equals(streamId, VmService.EXTENSION_STREAM_ID)) {
+            if (StringUtil.equals("Flutter.Frame", event.getExtensionKind())) {
+              handleFlutterFrame(app);
+            }
+          }
+        }
+
+        @Override
+        public void connectionClosed() {
+          ApplicationManager.getApplication().invokeLater(() -> {
+            final ContentManager contentManager = toolWindow.getContentManager();
+            onAppChanged(app);
+            final PerAppState state = perAppViewState.remove(app);
+            if (state != null && state.content != null) {
+              contentManager.removeContent(state.content, true);
+            }
+            if (perAppViewState.isEmpty()) {
+              // No more applications are running.
+              displayEmptyContent(toolWindow);
+            }
+          });
+        }
+      });
+
+      onAppChanged(app);
+
+      app.addStateListener(new FlutterApp.FlutterAppListener() {
+        public void notifyAppRestarted() {
+          // When we get a restart finishes, queue up a notification to the flutter view
+          // actions. We don't notify right away because the new isolate can take a little
+          // while to start up. We wait until we get the first frame event, which is
+          // enough of an indication that the isolate and flutter framework are initialized
+          // enough to receive service calls (for example, calls to restore various framework
+          // debugging settings).
+          final PerAppState state = getStateForApp(app);
+          if (state != null) {
+            state.sendRestartNotificationOnNextFrame = true;
+          }
+        }
+      });
     });
   }
 
@@ -579,6 +595,18 @@ class ToggleInspectModeAction extends FlutterViewToggleableAction {
   public void handleAppRestarted() {
     if (isSelected()) {
       setSelected(null, false);
+    }
+  }
+}
+
+class ForceRefreshAction extends FlutterViewAction {
+  ForceRefreshAction(@NotNull FlutterApp app) {
+    super(app, "Force Refresh Action", "For Refresh", AllIcons.Actions.ForceRefresh);
+  }
+
+  protected void perform(AnActionEvent event) {
+    if (app.isSessionActive()) {
+      app.getInspectorService().forceRefresh();
     }
   }
 }

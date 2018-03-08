@@ -17,18 +17,26 @@ import javax.swing.event.ChangeListener;
 public class FlutterViewState {
   private final EventDispatcher<ChangeListener> dispatcher = EventDispatcher.create(ChangeListener.class);
 
-  @Attribute(value = "splitter-proportion")
+  @Attribute(value = "splitter-proportion-horizontal")
   public float splitterProportion;
+
+  @Attribute(value = "splitter-proportion-horizontal")
+  public float subtreeSplitterProportion;
 
   public FlutterViewState() {
   }
 
-  public float getSplitterProportion() {
-    return splitterProportion <= 0.0f ? 0.8f : splitterProportion;
+  public float getSplitterProportion(boolean detailsSubtree) {
+    float value = detailsSubtree ? subtreeSplitterProportion : splitterProportion;
+    return value<= 0.0f ? 0.7f : value;
   }
 
-  public void setSplitterProportion(float value) {
-    splitterProportion = value;
+  public void setSplitterProportion(float value, boolean detailsSubtree) {
+    if (detailsSubtree) {
+      subtreeSplitterProportion = value;
+    } else {
+      splitterProportion = value;
+    }
     dispatcher.getMulticaster().stateChanged(new ChangeEvent(this));
   }
 
@@ -42,5 +50,6 @@ public class FlutterViewState {
 
   void copyFrom(FlutterViewState other) {
     splitterProportion = other.splitterProportion;
+    subtreeSplitterProportion = other.subtreeSplitterProportion;
   }
 }
