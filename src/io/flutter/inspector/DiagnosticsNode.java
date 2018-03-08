@@ -5,7 +5,6 @@
  */
 package io.flutter.inspector;
 
-import com.google.common.collect.Lists;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
@@ -27,11 +26,6 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
-import static io.flutter.sdk.FlutterSettingsConfigurable.WIDGET_FILTERING_ENABLED;
 
 /**
  * Defines diagnostics data for a [value].
@@ -50,7 +44,7 @@ import static io.flutter.sdk.FlutterSettingsConfigurable.WIDGET_FILTERING_ENABLE
  * of Diagnostics than because the class hierarchy of Diagnostics is
  * important. If you need to determine the exact Diagnostic class on the
  * Dart side you can use the value of type. The raw Dart object value is
- * also available via the getValue() method.
+ * also available via the findDiagnosticsValue() method.
  */
 public class DiagnosticsNode {
   private static final CustomIconMaker iconMaker = new CustomIconMaker();
@@ -58,11 +52,17 @@ public class DiagnosticsNode {
   private Location location;
   private DiagnosticsNode parent;
 
+  private final InspectorObjectGroup objectGroup;
+
   private CompletableFuture<String> propertyDocFuture;
 
-  public DiagnosticsNode(JsonObject json, InspectorService inspectorService) {
-    this.inspectorService = inspectorService;
+  private ArrayList<DiagnosticsNode> cachedProperties;
+
+  public DiagnosticsNode(JsonObject json, InspectorService inspectorService, InspectorObjectGroup objectGroup, boolean isProperty) {
     this.json = json;
+    this.inspectorService = inspectorService;
+    this.objectGroup = objectGroup;
+    this.isProperty = isProperty;
   }
 
   @Override
@@ -457,6 +457,12 @@ public class DiagnosticsNode {
 
   private CompletableFuture<Map<String, InstanceRef>> valueProperties;
 
+  private final boolean isProperty;
+
+  public boolean isProperty() {
+    return isProperty;
+  }
+
   public String getStringMember(@NotNull String memberName) {
     return JsonUtils.getStringMember(json, memberName);
   }
@@ -521,8 +527,7 @@ public class DiagnosticsNode {
     final InspectorInstanceRef valueRef = getValueRef();
     if (valueProperties == null) {
       if (getPropertyType() == null || valueRef == null || valueRef.getId() == null) {
-        valueProperties = new CompletableFuture<>();
-        valueProperties.complete(null);
+        valueProperties = CompletableFuture.completedFuture(null);
         return valueProperties;
       }
       if (isEnumProperty()) {
@@ -542,13 +547,16 @@ public class DiagnosticsNode {
           propertyNames = new String[]{"codePoint"};
           break;
         default:
-          valueProperties = new CompletableFuture<>();
-          valueProperties.complete(null);
+          valueProperties = CompletableFuture.completedFuture(null);
           return valueProperties;
       }
       valueProperties = inspectorService.getDartObjectProperties(getValueRef(), propertyNames);
     }
     return valueProperties;
+  }
+
+  public JsonObject getValuePropertiesJson() {
+    return json.getAsJsonObject("valueProperties");
   }
 
   public boolean hasChildren() {
@@ -560,52 +568,34 @@ public class DiagnosticsNode {
   }
 
   /**
+   * Whether this node is being displayed as a full tree or a filtered tree.
+   */
+  public boolean isSummaryTree() {
+    return getBooleanMember("summaryTree", false);
+  }
+
+  /**
    * Check whether children are already available.
    */
   public boolean childrenReady() {
-    return children != null && children.isDone();
+    return json.has("children") || (children != null && children.isDone());
   }
 
   public CompletableFuture<ArrayList<DiagnosticsNode>> getChildren() {
     if (children == null) {
-      if (hasChildren()) {
-        children = inspectorService.getChildren(getDartDiagnosticRef());
-
-        // Apply filters.
-        if (WIDGET_FILTERING_ENABLED) {
-          try {
-            final ArrayList<DiagnosticsNode> nodes = children.get();
-
-            final ArrayList<DiagnosticsNode> filtered = Lists.newArrayList(nodes);
-            // Filter private classes as a baby-step.
-            filtered.removeIf(FlutterWidget.Filter.PRIVATE_CLASS);
-
-            if (!filtered.isEmpty()) {
-              children = new CompletableFuture<>();
-              children.complete(filtered);
-            }
-            else {
-              if (!nodes.isEmpty()) {
-                final CompletableFuture<ArrayList<DiagnosticsNode>> future = nodes.get(0).getChildren();
-                for (int i = 1; i < nodes.size(); ++i) {
-                  future.thenCombine(nodes.get(i).getChildren(),
-                                     (nodes1, nodes2) -> Stream.of(nodes1, nodes2)
-                                       .flatMap(Collection::stream)
-                                       .collect(Collectors.toList()));
-                }
-                return future;
-              }
-            }
-          }
-          catch (InterruptedException | ExecutionException e) {
-            // Ignore.
-          }
+      if (json.has("children")) {
+        final JsonArray jsonArray = json.get("children").getAsJsonArray();
+        final ArrayList<DiagnosticsNode> nodes = new ArrayList<>();
+        for (JsonElement element : jsonArray) {
+          nodes.add(new DiagnosticsNode(element.getAsJsonObject(), inspectorService, objectGroup, false));
         }
+        children = CompletableFuture.completedFuture(nodes);
+      } else  if (hasChildren()) {
+        children = inspectorService.getChildren(getDartDiagnosticRef(), isSummaryTree(), objectGroup);
       }
       else {
         // Known to have no children so we can provide the children immediately.
-        children = new CompletableFuture<>();
-        children.complete(new ArrayList<>());
+        children = CompletableFuture.completedFuture(new ArrayList<>());
       }
     }
     return children;
@@ -618,35 +608,54 @@ public class DiagnosticsNode {
     return new InspectorInstanceRef(json.get("objectId").getAsString());
   }
 
-  public CompletableFuture<ArrayList<DiagnosticsNode>> getProperties() {
-    final CompletableFuture<ArrayList<DiagnosticsNode>> properties = inspectorService.getProperties(getDartDiagnosticRef());
-    return properties.thenApplyAsync((ArrayList<DiagnosticsNode> nodes) -> {
-      // Map locations to property nodes where available.
-      final Location creationLocation = getCreationLocation();
-      if (creationLocation != null) {
-        final ArrayList<Location> parameterLocations = creationLocation.getParameterLocations();
-        if (parameterLocations != null) {
-          final Map<String, Location> names = new HashMap<>();
-          for (Location location : parameterLocations) {
-            final String name = location.getName();
-            if (name != null) {
-              names.put(name, location);
-            }
+  /**
+   * Properties to show inline in the widget tree.
+   */
+  public ArrayList<DiagnosticsNode> getInlineProperties() {
+    if (cachedProperties == null) {
+      cachedProperties = new ArrayList<>();
+      if (json.has("properties")) {
+        final JsonArray jsonArray = json.get("properties").getAsJsonArray();
+        for (JsonElement element : jsonArray) {
+          cachedProperties.add(new DiagnosticsNode(element.getAsJsonObject(), inspectorService, objectGroup, true));
+        }
+        trackPropertiesMatchingParameters(cachedProperties);
+      }
+    }
+    return cachedProperties;
+  }
+
+  public CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorObjectGroup groupForProperties) {
+    final CompletableFuture<ArrayList<DiagnosticsNode>> properties = inspectorService.getProperties(getDartDiagnosticRef(), groupForProperties);
+    return properties.thenApplyAsync(this::trackPropertiesMatchingParameters);
+  }
+
+  ArrayList<DiagnosticsNode> trackPropertiesMatchingParameters(ArrayList<DiagnosticsNode> nodes) {
+    // Map locations to property nodes where available.
+    final Location creationLocation = getCreationLocation();
+    if (creationLocation != null) {
+      final ArrayList<Location> parameterLocations = creationLocation.getParameterLocations();
+      if (parameterLocations != null) {
+        final Map<String, Location> names = new HashMap<>();
+        for (Location location : parameterLocations) {
+          final String name = location.getName();
+          if (name != null) {
+            names.put(name, location);
           }
-          for (DiagnosticsNode node : nodes) {
-            node.setParent(this);
-            final String name = node.getName();
-            if (name != null) {
-              final Location parameterLocation = names.get(name);
-              if (parameterLocation != null) {
-                node.setCreationLocation(parameterLocation);
-              }
+        }
+        for (DiagnosticsNode node : nodes) {
+          node.setParent(this);
+          final String name = node.getName();
+          if (name != null) {
+            final Location parameterLocation = names.get(name);
+            if (parameterLocation != null) {
+              node.setCreationLocation(parameterLocation);
             }
           }
         }
       }
-      return nodes;
-    });
+    }
+    return nodes;
   }
 
   @NotNull

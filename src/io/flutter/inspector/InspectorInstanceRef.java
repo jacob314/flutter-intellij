@@ -23,9 +23,17 @@ public class InspectorInstanceRef {
   public boolean equals(Object other) {
     //noinspection SimplifiableIfStatement
     if (other instanceof InspectorInstanceRef) {
+      if (id == null) {
+        return ((InspectorInstanceRef)other).id == null;
+      }
       return ((InspectorInstanceRef)other).id.equals(id);
     }
     return false;
+  }
+
+  @Override
+  public int hashCode() {
+    return id != null ? id.hashCode() : 0;
   }
 
   @Override
