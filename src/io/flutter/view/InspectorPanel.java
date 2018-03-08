@@ -183,6 +183,12 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     myPropertiesPanel.showProperties(null);
   }
 
+  @Override
+  public void onForceRefresh() {
+    recomputeTreeRoot();
+    // TODO(jacobr): update properties as well?
+  }
+
   public void onAppChanged() {
     setActivate(isApplicable.compute());
   }

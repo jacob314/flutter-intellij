@@ -296,8 +296,7 @@ public class InspectorService implements Disposable {
         // isWidgetTreeReady method. In this case, we will fail gracefully
         // risking not displaying the Widget tree but ensuring we do not throw
         // exceptions due to accessing the widget tree before it is safe to.
-        final CompletableFuture<Boolean> value = new CompletableFuture<>();
-        value.complete(false);
+        final CompletableFuture<Boolean> value = CompletableFuture.completedFuture(false);
         return value;
       }
       return invokeServiceMethod("isWidgetTreeReady").thenApplyAsync((InstanceRef ref) -> "true".equals(ref.getValueAsString()));
@@ -439,6 +438,12 @@ public class InspectorService implements Disposable {
     }
   }
 
+  public void forceRefresh() {
+    for (InspectorServiceClient client : clients) {
+      client.onForceRefresh();
+    }
+  }
+
   public void setSelection(InspectorInstanceRef selection, boolean uiAlreadyUpdated) {
     handleSetSelection(invokeServiceMethod("setSelectionById", selection), uiAlreadyUpdated);
   }
@@ -472,8 +477,7 @@ public class InspectorService implements Disposable {
 
   public CompletableFuture<Map<String, InstanceRef>> getEnumPropertyValues(InspectorInstanceRef ref) {
     if (ref == null || ref.getId() == null) {
-      final CompletableFuture<Map<String, InstanceRef>> ret = new CompletableFuture<>();
-      ret.complete(new HashMap<>());
+      final CompletableFuture<Map<String, InstanceRef>> ret = CompletableFuture.completedFuture(new HashMap<>());
       return ret;
     }
     return getInstance(toObservatoryInstanceRef(ref))
@@ -503,6 +507,7 @@ public class InspectorService implements Disposable {
 
   public enum FlutterTreeType {
     widget("Widget"),
+    platformWidgets("PlatformWidget"),
     renderObject("Render");
     // TODO(jacobr): add semantics, and layer trees.
 
@@ -519,5 +524,7 @@ public class InspectorService implements Disposable {
     void onFlutterFrame();
 
     void onIsolateStopped();
+
+    void onForceRefresh();
   }
 }

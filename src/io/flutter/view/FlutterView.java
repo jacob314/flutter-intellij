@@ -114,6 +114,8 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
     toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
     toolbarGroup.addSeparator();
+    toolbarGroup.add(registerAction(new ForceRefreshAction(app)));
+    toolbarGroup.addSeparator();
     toolbarGroup.add(registerAction(new DebugDrawAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
     toolbarGroup.add(registerAction(new PerformanceOverlayAction(app)));
@@ -572,6 +574,18 @@ class ToggleInspectModeAction extends FlutterViewToggleableAction {
   public void handleAppRestarted() {
     if (isSelected()) {
       setSelected(null, false);
+    }
+  }
+}
+
+class ForceRefreshAction extends FlutterViewAction {
+  ForceRefreshAction(@NotNull FlutterApp app) {
+    super(app, "Force Refresh Action", "For Refresh", AllIcons.Actions.ForceRefresh);
+  }
+
+  protected void perform(AnActionEvent event) {
+    if (app.isSessionActive()) {
+      app.getInspectorService().forceRefresh();
     }
   }
 }
