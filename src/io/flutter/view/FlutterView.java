@@ -85,7 +85,12 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
   @NotNull
   @Override
   public FlutterViewState getState() {
-    return this.state;
+    return state;
+  }
+
+  @NotNull
+  public Project getProject() {
+    return myProject;
   }
 
   @Override

@@ -552,6 +552,13 @@ public class DiagnosticsNode {
   }
 
   /**
+   * Whether this node is being displayed as a full tree or a filtered tree.
+   */
+  public boolean isFull() {
+    return getBooleanMember("full", false);
+  }
+
+  /**
    * Check whether children are already available.
    */
   public boolean childrenReady() {
@@ -568,7 +575,7 @@ public class DiagnosticsNode {
         }
         children = CompletableFuture.completedFuture(nodes);
       } else  if (hasChildren()) {
-        children = inspectorService.getChildren(getDartDiagnosticRef());
+        children = inspectorService.getChildren(getDartDiagnosticRef(), isFull());
       }
       else {
         // Known to have no children so we can provide the children immediately.
