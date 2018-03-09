@@ -20,27 +20,23 @@ public class FlutterViewState {
   @Attribute(value = "splitter-proportion-horizontal")
   public float splitterProportion;
 
-  @Attribute(value = "details-splitter-proportion")
-  public float detailsSplitterPortion;
+  @Attribute(value = "splitter-proportion-horizontal")
+  public float subtreeSplitterProportion;
 
   public FlutterViewState() {
   }
 
-  public float getSplitterProportion() {
-    return splitterProportion <= 0.0f ? 0.7f : splitterProportion;
+  public float getSplitterProportion(boolean detailsSubtree) {
+    float value = detailsSubtree ? subtreeSplitterProportion : splitterProportion;
+    return value<= 0.0f ? 0.7f : value;
   }
 
-  public float getDetailsSplitterProportion() {
-    return detailsSplitterPortion <= 0.0f ? 0.6f : detailsSplitterPortion;
-  }
-
-  public void setSplitterProportion(float value) {
-    splitterProportion = value;
-    dispatcher.getMulticaster().stateChanged(new ChangeEvent(this));
-  }
-
-  public void setDetailsSplitterProportion(float value) {
-    detailsSplitterPortion = value;
+  public void setSplitterProportion(float value, boolean detailsSubtree) {
+    if (detailsSubtree) {
+      subtreeSplitterProportion = value;
+    } else {
+      splitterProportion = value;
+    }
     dispatcher.getMulticaster().stateChanged(new ChangeEvent(this));
   }
 
@@ -54,6 +50,6 @@ public class FlutterViewState {
 
   void copyFrom(FlutterViewState other) {
     splitterProportion = other.splitterProportion;
-    detailsSplitterPortion = other.detailsSplitterPortion;
+    subtreeSplitterProportion = other.subtreeSplitterProportion;
   }
 }

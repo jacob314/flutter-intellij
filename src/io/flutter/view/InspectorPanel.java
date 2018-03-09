@@ -6,6 +6,7 @@
 package io.flutter.view;
 
 import com.google.common.base.Joiner;
+import com.intellij.execution.ui.layout.impl.JBRunnerTabs;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.diagnostic.Logger;
@@ -16,12 +17,15 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.*;
 import com.intellij.ui.dualView.TreeTableView;
 import com.intellij.ui.speedSearch.SpeedSearchUtil;
+import com.intellij.ui.tabs.TabInfo;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.ui.treeStructure.treetable.ListTreeTableModelOnColumns;
 import com.intellij.util.ui.ColumnInfo;
+import com.intellij.util.ui.EmptyIcon;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import com.intellij.util.ui.tree.TreeUtil;
+import com.intellij.util.ui.tree.WideSelectionTreeUI;
 import com.intellij.xdebugger.impl.ui.DebuggerUIUtil;
 import com.intellij.xdebugger.impl.ui.tree.nodes.XValueNodeImpl;
 import io.flutter.FlutterBundle;
@@ -33,23 +37,23 @@ import io.flutter.utils.AsyncRateLimiter;
 import io.flutter.utils.AsyncUtils;
 import io.flutter.utils.ColorIconMaker;
 import org.dartlang.vm.service.element.InstanceRef;
+import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.accessibility.AccessibleContext;
 import javax.swing.*;
 import javax.swing.event.TreeExpansionEvent;
 import javax.swing.event.TreeExpansionListener;
-import javax.swing.plaf.basic.BasicTreeUI;
+import javax.swing.plaf.TreeUI;
 import javax.swing.table.JTableHeader;
 import javax.swing.table.TableCellRenderer;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeModel;
-import javax.swing.tree.TreeNode;
-import javax.swing.tree.TreePath;
+import javax.swing.tree.*;
 import java.awt.*;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
@@ -75,13 +79,16 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   public static final double REFRESH_FRAMES_PER_SECOND = 5.0;
 
   private final TreeDataProvider myRootsTree;
-  private final PropertiesPanel myPropertiesPanel;
+  @Nullable private final PropertiesPanel myPropertiesPanel;
   private final Computable<Boolean> isApplicable;
   private final InspectorService.FlutterTreeType treeType;
   private final FlutterView flutterView;
   @NotNull
   private final FlutterApp flutterApp;
+  private final boolean detailsSubtree;
   private CompletableFuture<DiagnosticsNode> rootFuture;
+  /* Only valid if detailsSubtree is true. */
+  private DiagnosticsNode subtreeRoot;
 
   private static final DataKey<Tree> INSPECTOR_KEY = DataKey.create("Flutter.InspectorKey");
 
@@ -99,6 +106,10 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
   private CompletableFuture<DiagnosticsNode> pendingSelectionFuture;
   @SuppressWarnings("FieldMayBeFinal") private boolean myIsListening = false;
+
+  private final InspectorPanel detailsWidgetSubtreePanel;
+  private final InspectorPanel detailsRenderObjectSubtreePanel;
+
   private boolean isActive = false;
 
   private final AsyncRateLimiter refreshRateLimiter;
@@ -107,28 +118,50 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
   public InspectorPanel(FlutterView flutterView,
                         @NotNull FlutterApp flutterApp,
-                        Computable<Boolean> isApplicable,
-                        InspectorService.FlutterTreeType treeType) {
+                        @NotNull Computable<Boolean> isApplicable,
+                        @NotNull InspectorService.FlutterTreeType treeType) {
+    this(flutterView, flutterApp, isApplicable, treeType, false, null, false);
+  }
+
+  private InspectorPanel(FlutterView flutterView,
+                        @NotNull FlutterApp flutterApp,
+                        @NotNull Computable<Boolean> isApplicable,
+                        @NotNull InspectorService.FlutterTreeType treeType,
+                        @NotNull boolean detailsSubtree,
+                        @Nullable InspectorService.FlutterTreeType parentTreeType,
+                        @NotNull boolean rootVisible) {
     super(new BorderLayout());
 
     this.treeType = treeType;
     this.flutterView = flutterView;
     this.flutterApp = flutterApp;
     this.isApplicable = isApplicable;
+    this.detailsSubtree = detailsSubtree;
 
     refreshRateLimiter = new AsyncRateLimiter(REFRESH_FRAMES_PER_SECOND, this::refresh);
 
-    myRootsTree = new TreeDataProvider(new DefaultMutableTreeNode(null), treeType.displayName);
+    myRootsTree = new TreeDataProvider(new DefaultMutableTreeNode(null), treeType.displayName, detailsSubtree, parentTreeType != null ? parentTreeType.displayName : null, rootVisible);
     myRootsTree.addTreeExpansionListener(new MyTreeExpansionListener());
-    myPropertiesPanel = new PropertiesPanel();
+
+    //getInspectorService().
+    if (treeType == InspectorService.FlutterTreeType.widget && !detailsSubtree) {
+      /// XXX AND inspector service supports getting filtered trees.
+      /// TWEAK ORDER
+      // We don't yet have a similar notion of platform RenderObject as the render object tree is more low level.
+      detailsWidgetSubtreePanel = new InspectorPanel(flutterView, flutterApp, isApplicable, InspectorService.FlutterTreeType.widget, true, treeType, true); // XXX rootVisible false?
+      detailsRenderObjectSubtreePanel = new InspectorPanel(flutterView, flutterApp, isApplicable, InspectorService.FlutterTreeType.renderObject, true, treeType, true);
+    } else {
+      detailsWidgetSubtreePanel = null;
+      detailsRenderObjectSubtreePanel = null;
+    }
 
     initTree(myRootsTree);
     myRootsTree.getSelectionModel().addTreeSelectionListener(e -> selectionChanged());
 
-    final Splitter treeSplitter = new Splitter(true);
-    treeSplitter.setProportion(flutterView.getState().getSplitterProportion());
+    final Splitter treeSplitter = new Splitter(detailsSubtree);
+    treeSplitter.setProportion(flutterView.getState().getSplitterProportion(detailsSubtree));
     flutterView.getState().addListener(e -> {
-      final float newProportion = flutterView.getState().getSplitterProportion();
+      final float newProportion = flutterView.getState().getSplitterProportion(detailsSubtree);
       if (treeSplitter.getProportion() != newProportion) {
         treeSplitter.setProportion(newProportion);
       }
@@ -137,14 +170,27 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     treeSplitter.addPropertyChangeListener("proportion", new PropertyChangeListener() {
       @Override
       public void propertyChange(PropertyChangeEvent evt) {
-        flutterView.getState().setSplitterProportion(treeSplitter.getProportion());
+        flutterView.getState().setSplitterProportion(treeSplitter.getProportion(), detailsSubtree);
       }
     });
+
+    if (detailsWidgetSubtreePanel == null) {
+      myPropertiesPanel = new PropertiesPanel();
+      treeSplitter.setSecondComponent(ScrollPaneFactory.createScrollPane(myPropertiesPanel));
+    } else {
+      myPropertiesPanel = null; /// This InspectorPanel doesn't have its own property panel.
+      final JBRunnerTabs tabs = new JBRunnerTabs(flutterView.getProject(), ActionManager.getInstance(), null, this);
+      tabs.addTab(new TabInfo(detailsWidgetSubtreePanel)
+                    .append("Widget Subtree Details", SimpleTextAttributes.REGULAR_ATTRIBUTES));
+      tabs.addTab(new TabInfo(detailsRenderObjectSubtreePanel)
+        .append("Rendering Details", SimpleTextAttributes.REGULAR_ATTRIBUTES));
+
+      treeSplitter.setSecondComponent(tabs.getComponent());
+    }
 
     // TODO(jacobr): surely there is more we should be disposing.
     Disposer.register(this, treeSplitter::dispose);
     treeSplitter.setFirstComponent(ScrollPaneFactory.createScrollPane(myRootsTree));
-    treeSplitter.setSecondComponent(ScrollPaneFactory.createScrollPane(myPropertiesPanel));
     add(treeSplitter);
   }
 
@@ -162,7 +208,10 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
   private CompletableFuture<?> refresh() {
     // TODO(jacobr): refresh the tree as well as just the properties.
-    return myPropertiesPanel.refresh();
+    if (myPropertiesPanel != null) {
+      return myPropertiesPanel.refresh();
+    }
+    return CompletableFuture.completedFuture(null);
   }
 
   public void onIsolateStopped() {
@@ -186,7 +235,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   @Override
   public void onForceRefresh() {
     recomputeTreeRoot();
-    // TODO(jacobr): update properties as well?
+    if (myPropertiesPanel != null) {
+      myPropertiesPanel.refresh();
+    }
   }
 
   public void onAppChanged() {
@@ -235,17 +286,111 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
     rootFuture = getInspectorService().getRoot(treeType);
 
+    setupTreeRoot();
+    return rootFuture;
+  }
+  /**
+   * Show the platform subtree given a
+   * @param node
+   */
+
+  public CompletableFuture<DiagnosticsNode> showDetailSubtrees(DiagnosticsNode node) {
+    // XXX handle render objects subtree panel. Need 
+    if (detailsWidgetSubtreePanel != null) {
+      return detailsWidgetSubtreePanel.setSubtreeRoot(node);
+    }
+    return null;
+  }
+
+  public CompletableFuture<DiagnosticsNode> setSubtreeRoot(DiagnosticsNode node) {
+    assert(detailsSubtree);
+    if (node != null && treeType == InspectorService.FlutterTreeType.widget && !node.isCreatedByLocalProject()) {
+      // This isn't a platform node... the existing platform tree is fine.
+      // TODO(jacobr): verify that the platform ndoe is in the currently displayed platform tree
+      // otherwise we have an issue
+      return null;
+    }
+
+    if (node == subtreeRoot) {
+      /// Selection not changed.
+      return CompletableFuture.completedFuture(null);
+    }
+    subtreeRoot = node;
+    if (rootFuture != null && !rootFuture.isDone()) {
+      rootFuture.cancel(false);
+    }
+    rootFuture = getInspectorService().getDetailsSubtree(node);
+
+    setupTreeRoot();
+    return rootFuture;
+  }
+
+  private void setupTreeRoot() {
     whenCompleteUiThread(rootFuture, (final DiagnosticsNode n, Throwable error) -> {
       if (error != null) {
+        // It is fine for us to have a cancelled future error.
         return;
       }
       final DefaultMutableTreeNode rootNode = new DefaultMutableTreeNode(n);
       // TODO(jacobr): be more judicious about nuking the whole tree.
       setupTreeNode(rootNode, n);
-      maybeLoadChildren(rootNode);
+      if (!n.childrenReady()) {
+        maybeLoadChildren(rootNode);
+      }
       getTreeModel().setRoot(rootNode);
+
+      expandAll(myRootsTree, new TreePath(rootNode));
+      if (detailsSubtree) {
+        setSelection(subtreeRoot);
+      }
     });
-    return rootFuture;
+  }
+
+  private void setSelection(DiagnosticsNode target) {
+    setSelectionHelper(myRootsTree, new TreePath(getTreeModel().getRoot()), target);
+  }
+
+  private static boolean setSelectionHelper(JTree tree, TreePath parent, DiagnosticsNode target) {
+    DefaultMutableTreeNode node = (DefaultMutableTreeNode) parent.getLastPathComponent();
+
+    if (node.getUserObject() instanceof DiagnosticsNode) {
+      final DiagnosticsNode diagonsticsNode = (DiagnosticsNode)node.getUserObject();
+      if (diagonsticsNode.getValueRef().equals(target.getValueRef())) {
+        tree.setSelectionPath(parent);
+        tree.scrollPathToVisible(parent);
+        return true;
+      }
+    }
+
+    if (node.getChildCount() >= 0) {
+      for (Enumeration e = node.children(); e.hasMoreElements();) {
+        TreeNode n = (TreeNode) e.nextElement();
+        TreePath path = parent.pathByAddingChild(n);
+        if (setSelectionHelper(tree, path, target)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+
+  private static void expandAll(JTree tree, TreePath parent) {
+    TreeNode node = (TreeNode) parent.getLastPathComponent();
+    if (node.getChildCount() >= 0) {
+      for (Enumeration e = node.children(); e.hasMoreElements();) {
+        DefaultMutableTreeNode n = (DefaultMutableTreeNode) e.nextElement();
+        if (n.getUserObject() instanceof DiagnosticsNode) {
+          final DiagnosticsNode diagonsticsNode = (DiagnosticsNode)n.getUserObject();
+          if (!diagonsticsNode.childrenReady()) {
+            // Don't force an expand if the children haven't been preloaded.
+            continue;
+          }
+        }
+        expandAll(tree, parent.pathByAddingChild(n));
+      }
+    }
+    tree.expandPath(parent);
   }
 
   void setupTreeNode(DefaultMutableTreeNode node, DiagnosticsNode diagnosticsNode) {
@@ -316,6 +461,10 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   }
 
   public void onInspectorSelectionChanged() {
+    if (detailsSubtree) {
+      // TODO(jacobr): should we clear and wait for our master to update us?
+      return;
+    }
     if (pendingSelectionFuture != null) {
       // Pending selection changed is obsolete.
       if (!pendingSelectionFuture.isDone()) {
@@ -446,9 +595,14 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
               .navigate(false);
           }
         }
-        myPropertiesPanel.showProperties(diagnostic);
-        if (getInspectorService() != null) {
-          getInspectorService().setSelection(diagnostic.getValueRef(), false);
+        if (myPropertiesPanel != null) {
+          myPropertiesPanel.showProperties(diagnostic);
+        }
+        if (!detailsSubtree) {
+          if (getInspectorService() != null) {
+            getInspectorService().setSelection(diagnostic.getValueRef(), false);
+          }
+          showDetailSubtrees(diagnostic);
         }
       }
     }
@@ -457,7 +611,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   private void initTree(final Tree tree) {
     tree.setCellRenderer(new DiagnosticsTreeCellRenderer());
     tree.setShowsRootHandles(true);
-    UIUtil.setLineStyleAngled(tree);
+    // XXX UIUtil.setLineStyleAngled(tree);
 
     TreeUtil.installActions(tree);
 
@@ -491,17 +645,219 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     // TODO(jacobr): actually implement.
   }
 
+  private static class InspectorTreeUI extends WideSelectionTreeUI {
+    boolean leftToRight = true; /// XXX LOOKUP.
+
+    InspectorTreeUI() {
+      super(false, (Integer value) -> false);
+    }
+
+    @Override
+    protected void paintExpandControl(Graphics g,
+                                      Rectangle clipBounds,
+                                      Insets insets,
+                                      Rectangle bounds,
+                                      TreePath path,
+                                      int row,
+                                      boolean isExpanded,
+                                      boolean hasBeenExpanded,
+                                      boolean isLeaf) {
+      boolean isPathSelected = tree.getSelectionModel().isPathSelected(path);
+      if (!isLeaf(row)) {
+        setExpandedIcon(UIUtil.getTreeNodeIcon(true, false, false));
+        setCollapsedIcon(UIUtil.getTreeNodeIcon(false, false, false));
+      }
+
+      paintExpandControlHelper(g, clipBounds, insets, bounds, path, row, isExpanded, hasBeenExpanded, isLeaf);
+    }
+
+    /**
+     * Paints the expand (toggle) part of a row. The receiver should
+     * NOT modify <code>clipBounds</code>, or <code>insets</code>.
+     */
+    /// METHOD FROM BasicTreeUI we can't modify. TODO(jacobr): consider extending that class directly for less FOOBAR.
+    protected void paintExpandControlHelper(Graphics g,
+                                      Rectangle clipBounds, Insets insets,
+                                      Rectangle bounds, TreePath path,
+                                      int row, boolean isExpanded,
+                                      boolean hasBeenExpanded,
+                                      boolean isLeaf) {
+      Object       value = path.getLastPathComponent();
+
+      // Draw icons if not a leaf and either hasn't been loaded,
+      // or the model child count is > 0.
+      if (!isLeaf && (!hasBeenExpanded ||
+                      treeModel.getChildCount(value) > 0)) {
+        int middleXOfKnob;
+        if (leftToRight) {
+          middleXOfKnob = bounds.x - getRightChildIndent() + 1;
+        } else {
+          middleXOfKnob = bounds.x + bounds.width + getRightChildIndent() - 1;
+        }
+        int middleYOfKnob = bounds.y + (bounds.height / 2);
+
+        if (isExpanded) {
+          Icon expandedIcon = getExpandedIcon();
+          if(expandedIcon != null)
+            drawCentered(tree, g, expandedIcon, middleXOfKnob,
+                         middleYOfKnob );
+        }
+        else {
+          Icon collapsedIcon = getCollapsedIcon();
+          if(collapsedIcon != null)
+            drawCentered(tree, g, collapsedIcon, middleXOfKnob,
+                         middleYOfKnob);
+        }
+      }
+    }
+
+
+    @Override
+    /**
+     * Paints the vertical part of the leg. The receiver should
+     * NOT modify <code>clipBounds</code>, <code>insets</code>.
+     */
+    protected void paintVerticalPartOfLeg(Graphics g, Rectangle clipBounds,
+                                          Insets insets, TreePath path) {
+      boolean paintLines = true;
+
+      if (path.getLastPathComponent() instanceof DefaultMutableTreeNode) {
+        DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+        if (node.getChildCount() < 2) {
+          return;
+        }
+      }
+
+      if (!paintLines) {
+        return;
+      }
+
+      int depth = path.getPathCount() - 1;
+      if (depth == 0 && !getShowsRootHandles() && !isRootVisible()) {
+        return;
+      }
+      int lineX = getRowX(-1, depth);
+      if (leftToRight) {
+        lineX = lineX - getRightChildIndent() + insets.left;
+      }
+      else {
+        lineX = tree.getWidth() - lineX - insets.right +
+                getRightChildIndent() - 1;
+      }
+      int clipLeft = clipBounds.x;
+      int clipRight = clipBounds.x + (clipBounds.width - 1);
+
+      if (lineX >= clipLeft && lineX <= clipRight) {
+        int clipTop = clipBounds.y;
+        int clipBottom = clipBounds.y + clipBounds.height;
+        Rectangle parentBounds = getPathBounds(tree, path);
+        TreePath lastChildPath = getLastChildPath(path);
+        while(tree.isExpanded(lastChildPath)) {
+          TreePath candidate = getLastChildPath(lastChildPath);
+          if (candidate == null)
+            break;
+          lastChildPath = candidate;
+        }
+        Rectangle lastChildBounds = getPathBounds(tree, lastChildPath);
+
+
+        if(lastChildBounds == null)
+          // This shouldn't happen, but if the model is modified
+          // in another thread it is possible for this to happen.
+          // Swing isn't multithreaded, but I'll add this check in
+          // anyway.
+          return;
+
+        int top;
+
+        if(parentBounds == null) {
+          top = Math.max(insets.top + getVerticalLegBuffer(),
+                         clipTop);
+        }
+        else
+          top = Math.max(parentBounds.y + parentBounds.height +
+                         getVerticalLegBuffer(), clipTop);
+        if(depth == 0 && !isRootVisible()) {
+          TreeModel      model = getModel();
+
+          if(model != null) {
+            Object        root = model.getRoot();
+
+            if(model.getChildCount(root) > 0) {
+              parentBounds = getPathBounds(tree, path.
+                pathByAddingChild(model.getChild(root, 0)));
+              if(parentBounds != null)
+                top = Math.max(insets.top + getVerticalLegBuffer(),
+                               parentBounds.y +
+                               parentBounds.height / 2); /// XXX update this as well?
+            }
+          }
+        }
+
+        int bottom = Math.min(lastChildBounds.y +
+                              (lastChildBounds.height), clipBottom);
+
+        if (top <= bottom) {
+          g.setColor(getHashColor());
+          paintVerticalLine(g, tree, lineX, top, bottom);
+        }
+      }
+    }
+
+    /**
+     * Paints the horizontal part of the leg. The receiver should
+     * NOT modify <code>clipBounds</code>, or <code>insets</code>.<p>
+     * NOTE: <code>parentRow</code> can be -1 if the root is not visible.
+     */
+    @Override
+    protected void paintHorizontalPartOfLeg(Graphics g, Rectangle clipBounds,
+                                            Insets insets, Rectangle bounds,
+                                            TreePath path, int row,
+                                            boolean isExpanded,
+                                            boolean hasBeenExpanded, boolean
+                                              isLeaf) {
+    }
+
+    /**
+     * Paints a vertical line.
+     */
+    protected void paintVerticalLine(Graphics g, JComponent c, int x, int top,
+                                     int bottom) {
+      boolean lineTypeDashed = false;
+      if (lineTypeDashed) {
+        drawDashedVerticalLine(g, x, top, bottom);
+      } else {
+        g.drawLine(x, top, x, bottom);
+      }
+    }
+  }
+
   private static class TreeDataProvider extends Tree implements DataProvider, Disposable {
-    private TreeDataProvider(final DefaultMutableTreeNode treemodel, String treeName) {
+    public final boolean detailsSubtree;
+
+    @Override
+    public void setUI(TreeUI ui) {
+      TreeUI actualUI = ui;
+      if (!(ui instanceof InspectorTreeUI)) {
+        actualUI = new InspectorTreeUI();
+      }
+      // TODO(jacobr): why isn't thi
+      super.setUI(actualUI);
+    }
+
+    private TreeDataProvider(final DefaultMutableTreeNode treemodel, String treeName, boolean detailsSubtree, String parentTreeName, boolean rootVisible) {
       super(treemodel);
+      // XXX not needed.
+      setUI(new InspectorTreeUI());
 
-      setRootVisible(false);
+      this.detailsSubtree = detailsSubtree;
+      setRootVisible(rootVisible);
       registerShortcuts();
-      getEmptyText().setText(treeName + " tree for the running app");
-
-      // Decrease indent, scaled for different display types.
-      final BasicTreeUI ui = (BasicTreeUI)getUI();
-      ui.setRightChildIndent(JBUI.scale(4));
+      if (detailsSubtree) {
+        getEmptyText().setText(treeName + " subtree of the selected " + parentTreeName);
+      } else {
+        getEmptyText().setText(treeName + " tree for the running app");
+      }
     }
 
     void registerShortcuts() {
@@ -868,7 +1224,181 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
   }
 
-  private class DiagnosticsTreeCellRenderer extends ColoredTreeCellRenderer {
+  /**
+   * Duplicates code from ColoredTreeCellRenderer as was we need to customize
+   * are not feasible with subclassing.
+   */
+  private abstract class InspectorColoredTreeCellRenderer extends SimpleColoredComponent implements TreeCellRenderer {
+    /**
+     * Defines whether the tree is selected or not
+     */
+    protected boolean mySelected;
+    /**
+     * Defines whether the tree has focus or not
+     */
+    private boolean myFocused;
+    private boolean myFocusedCalculated;
+
+    protected JTree myTree;
+
+    private boolean myOpaque = true;
+    @Override
+    public final Component getTreeCellRendererComponent(JTree tree,
+                                                        Object value,
+                                                        boolean selected,
+                                                        boolean expanded,
+                                                        boolean leaf,
+                                                        int row,
+                                                        boolean hasFocus){
+      myTree = tree;
+
+      clear();
+
+      mySelected = selected;
+      myFocusedCalculated = false;
+
+      // We paint background if and only if tree path is selected and tree has focus.
+      // If path is selected and tree is not focused then we just paint focused border.
+      if (UIUtil.isFullRowSelectionLAF()) {
+        setBackground(selected ? UIUtil.getTreeSelectionBackground() : null);
+      }
+      else if (WideSelectionTreeUI.isWideSelection(tree)) {
+        setPaintFocusBorder(false);
+        if (selected) {
+          setBackground(hasFocus ? UIUtil.getTreeSelectionBackground() : UIUtil.getTreeUnfocusedSelectionBackground());
+        }
+      }
+      else if (selected) {
+        setPaintFocusBorder(true);
+        if (isFocused()) {
+          setBackground(UIUtil.getTreeSelectionBackground());
+        }
+        else {
+          setBackground(null);
+        }
+      }
+      else {
+        setBackground(null);
+      }
+
+      if (value instanceof LoadingNode) {
+        setForeground(JBColor.GRAY);
+        // XXX setIcon(LOADING_NODE_ICON);
+      }
+      else {
+        setForeground(tree.getForeground());
+        setIcon(null);
+      }
+
+      if (UIUtil.isUnderGTKLookAndFeel()){
+        super.setOpaque(false);  // avoid nasty background
+        super.setIconOpaque(false);
+      }
+      else if (UIUtil.isUnderNimbusLookAndFeel() && selected && hasFocus) {
+        super.setOpaque(false);  // avoid erasing Nimbus focus frame
+        super.setIconOpaque(false);
+      }
+      else if (WideSelectionTreeUI.isWideSelection(tree)) {
+        super.setOpaque(false);  // avoid erasing Nimbus focus frame
+        super.setIconOpaque(false);
+      }
+      else {
+        super.setOpaque(myOpaque || selected && hasFocus || selected && isFocused()); // draw selection background even for non-opaque tree
+      }
+
+      if (tree.getUI() instanceof WideSelectionTreeUI && UIUtil.isUnderAquaBasedLookAndFeel()) {
+        setMyBorder(null);
+        setIpad(new Insets(0, 2,  0, 2));
+      }
+
+      customizeCellRenderer(tree, value, selected, expanded, leaf, row, hasFocus);
+
+      return this;
+    }
+
+    public JTree getTree() {
+      return myTree;
+    }
+
+    protected final boolean isFocused() {
+      if (!myFocusedCalculated) {
+        myFocused = calcFocusedState();
+        myFocusedCalculated = true;
+      }
+      return myFocused;
+    }
+
+    protected boolean calcFocusedState() {
+      return myTree.hasFocus();
+    }
+
+    @Override
+    public void setOpaque(boolean isOpaque) {
+      myOpaque = isOpaque;
+      super.setOpaque(isOpaque);
+    }
+
+    @Override
+    public Font getFont() {
+      Font font = super.getFont();
+
+      // Cell renderers could have no parent and no explicit set font.
+      // Take tree font in this case.
+      if (font != null) return font;
+      JTree tree = getTree();
+      return tree != null ? tree.getFont() : null;
+    }
+
+    /**
+     * When the item is selected then we use default tree's selection foreground.
+     * It guaranties readability of selected text in any LAF.
+     */
+    @Override
+    public void append(@NotNull @Nls String fragment, @NotNull SimpleTextAttributes attributes, boolean isMainText) {
+      Color color = Color.GREEN;
+      if (mySelected && isFocused()) {
+        super.append(fragment, new SimpleTextAttributes(attributes.getStyle(), color), isMainText);
+      }
+      else if (mySelected) {
+        super.append(fragment, new SimpleTextAttributes(attributes.getStyle(), Color.RED /*UIUtil.getTreeForeground()*/), isMainText);
+      }
+      else {
+        super.append(fragment, attributes, isMainText);
+      }
+    }
+
+    /*@Override*/
+    void revalidateAndRepaint() {
+      // no need for this in a renderer
+    }
+
+    /**
+     * This method is invoked only for customization of component.
+     * All component attributes are cleared when this method is being invoked.
+     */
+    public abstract void customizeCellRenderer(@NotNull JTree tree,
+                                               Object value,
+                                               boolean selected,
+                                               boolean expanded,
+                                               boolean leaf,
+                                               int row,
+                                               boolean hasFocus);
+
+    @Override
+    public AccessibleContext getAccessibleContext() {
+      if (accessibleContext == null) {
+        // XXX can't do this
+       //  accessibleContext = new com.intellij.ui.ColoredTreeCellRenderer.AccessibleColoredTreeCellRenderer();
+      }
+      return accessibleContext;
+    }
+
+    protected class AccessibleColoredTreeCellRenderer extends AccessibleSimpleColoredComponent {
+    }
+  }
+
+
+  private class DiagnosticsTreeCellRenderer extends InspectorColoredTreeCellRenderer {
     /**
      * Split text into two groups, word characters at the start of a string
      * and all other characters. Skip an <code>-</code> or <code>#</code> between the
@@ -889,6 +1419,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       final boolean hasFocus
     ) {
 
+      setOpaque(true);
       this.tree = tree;
       this.selected = selected;
 
@@ -899,8 +1430,31 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       }
       if (!(userObject instanceof DiagnosticsNode)) return;
       final DiagnosticsNode node = (DiagnosticsNode)userObject;
+
+      boolean highlight;
+      if (detailsSubtree) {
+        highlight = subtreeRoot.getValueRef().equals(node.getValueRef()) || selected;
+      } else {
+        highlight = selected;
+      }
+      if (highlight) {
+        setPaintFocusBorder(true);
+        setOpaque(true);
+        setBackground(UIUtil.getTreeSelectionBackground());
+      }
+/*      if (selected) {
+        setForeground(Colors.DARK_RED); // UIUtil.getTreeSelectionForeground());
+      }
+      */
+
       final String name = node.getName();
       SimpleTextAttributes textAttributes = textAttributesForLevel(node.getLevel());
+
+      /*
+      if (highlight) {
+        appendText("➡", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+      }*/
+
       if (name != null && !name.isEmpty() && node.getShowName()) {
         // color in name?
         if (name.equals("child") || name.startsWith("child ")) {
@@ -914,22 +1468,23 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
           // Is this good?
           appendText(node.getSeparator(), SimpleTextAttributes.GRAY_ATTRIBUTES);
         }
-        appendText(" ", SimpleTextAttributes.GRAY_ATTRIBUTES);
       }
 
       if (isCreatedByLocalProject(node)) {
         textAttributes = textAttributes.derive(SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES.getStyle(), null, null, null);
       }
 
-      // TODO(jacobr): custom display for units, colors, iterables, and icons.
+            // TODO(jacobr): custom display for units, colors, iterables, and icons.
       final String description = node.getDescription();
       final Matcher match = primaryDescriptionPattern.matcher(description);
       if (match.matches()) {
+        appendText(" ", SimpleTextAttributes.GRAY_ATTRIBUTES);
         appendText(match.group(1), textAttributes);
         appendText(" ", textAttributes);
         appendText(match.group(2), SimpleTextAttributes.GRAYED_ATTRIBUTES);
       }
-      else {
+      else if (!node.getDescription().isEmpty()){
+        appendText(" ", SimpleTextAttributes.GRAY_ATTRIBUTES);
         appendText(node.getDescription(), textAttributes);
       }
 
@@ -941,6 +1496,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       if (icon != null) {
         setIcon(icon);
       }
+      ///setBackground(Color.red); // XXX
     }
 
     private void appendText(@NotNull String text, @NotNull SimpleTextAttributes attributes) {

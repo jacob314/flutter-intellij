@@ -271,8 +271,12 @@ public class InspectorService implements Disposable {
     return instanceRefFuture.thenComposeAsync(this::parseDiagnosticsNodes);
   }
 
-  CompletableFuture<ArrayList<DiagnosticsNode>> getChildren(InspectorInstanceRef instanceRef) {
-    return getListHelper(instanceRef, "getChildren");
+  CompletableFuture<ArrayList<DiagnosticsNode>> getChildren(InspectorInstanceRef instanceRef, boolean detailsSubtree) {
+    if (detailsSubtree) {
+      return getListHelper(instanceRef, "getChildrenDetailsSubtree");
+    } else {
+      return getListHelper(instanceRef, "getChildren");
+    }
   }
 
   CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorInstanceRef instanceRef) {
@@ -505,9 +509,12 @@ public class InspectorService implements Disposable {
       }));
   }
 
+  public CompletableFuture<DiagnosticsNode> getDetailsSubtree(DiagnosticsNode node) {
+    return parseDiagnosticsNode(invokeServiceMethod("getDetailsSubtree", node.getDartDiagnosticRef()));
+  }
+
   public enum FlutterTreeType {
     widget("Widget"),
-    platformWidgets("PlatformWidget"),
     renderObject("Render");
     // TODO(jacobr): add semantics, and layer trees.
 
