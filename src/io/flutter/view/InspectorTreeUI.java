@@ -112,7 +112,6 @@ class InspectorTreeUI extends WideSelectionTreeUI {
     if (!paintLines) {
       return;
     }
-
     int depth = path.getPathCount() - 1;
     if (depth == 0 && !getShowsRootHandles() && !isRootVisible()) {
       return;
@@ -132,15 +131,8 @@ class InspectorTreeUI extends WideSelectionTreeUI {
       int clipTop = clipBounds.y;
       int clipBottom = clipBounds.y + clipBounds.height;
       Rectangle parentBounds = getPathBounds(tree, path);
-      TreePath lastChildPath = getLastChildPath(path);
-      while(tree.isExpanded(lastChildPath)) {
-        TreePath candidate = getLastChildPath(lastChildPath);
-        if (candidate == null)
-          break;
-        lastChildPath = candidate;
-      }
-      Rectangle lastChildBounds = getPathBounds(tree, lastChildPath);
-
+      Rectangle lastChildBounds = getPathBounds(tree,
+                                                getLastChildPath(path));
 
       if(lastChildBounds == null)
         // This shouldn't happen, but if the model is modified
@@ -149,7 +141,7 @@ class InspectorTreeUI extends WideSelectionTreeUI {
         // anyway.
         return;
 
-      int top;
+      int       top;
 
       if(parentBounds == null) {
         top = Math.max(insets.top + getVerticalLegBuffer(),
@@ -159,7 +151,7 @@ class InspectorTreeUI extends WideSelectionTreeUI {
         top = Math.max(parentBounds.y + parentBounds.height +
                        getVerticalLegBuffer(), clipTop);
       if(depth == 0 && !isRootVisible()) {
-        TreeModel model = getModel();
+        TreeModel      model = getModel();
 
         if(model != null) {
           Object        root = model.getRoot();
@@ -170,13 +162,13 @@ class InspectorTreeUI extends WideSelectionTreeUI {
             if(parentBounds != null)
               top = Math.max(insets.top + getVerticalLegBuffer(),
                              parentBounds.y +
-                             parentBounds.height / 2); /// XXX update this as well?
+                             parentBounds.height / 2);
           }
         }
       }
 
       int bottom = Math.min(lastChildBounds.y +
-                            (lastChildBounds.height), clipBottom);
+                            (lastChildBounds.height / 2), clipBottom);
 
       if (top <= bottom) {
         g.setColor(getHashColor());
@@ -197,6 +189,50 @@ class InspectorTreeUI extends WideSelectionTreeUI {
                                           boolean isExpanded,
                                           boolean hasBeenExpanded, boolean
                                             isLeaf) {
+    if (path.getPathCount() >= 2) {
+      Object treeNode = path.getPathComponent(path.getPathCount() - 2);
+      if (treeNode instanceof DefaultMutableTreeNode) {
+        DefaultMutableTreeNode node = (DefaultMutableTreeNode) treeNode;
+        if (node.getChildCount() < 2) {
+          return;
+        }
+      }
+    }
+
+    // Don't paint the legs for the root'ish node if the
+    int depth = path.getPathCount() - 1;
+    if((depth == 0 || (depth == 1 && !isRootVisible())) &&
+       !getShowsRootHandles()) {
+      return;
+    }
+
+    int clipLeft = clipBounds.x;
+    int clipRight = clipBounds.x + clipBounds.width;
+    int clipTop = clipBounds.y;
+    int clipBottom = clipBounds.y + clipBounds.height;
+    int lineY = bounds.y + bounds.height / 2;
+    final int leafChildLineInset = 4;
+
+    if (leftToRight) {
+      int leftX = bounds.x - getRightChildIndent();
+      int nodeX = bounds.x - getHorizontalLegBuffer();
+
+      leftX = getRowX(row, depth - 1) - getRightChildIndent() + insets.left;
+      nodeX = isLeaf ? getRowX(row, depth) - leafChildLineInset:
+              getRowX(row, depth - 1);;
+      if(lineY >= clipTop
+         && lineY < clipBottom
+         && nodeX >= clipLeft
+         && leftX < clipRight
+         && leftX < nodeX) {
+
+        g.setColor(getHashColor());
+        paintHorizontalLine(g, tree, lineY, leftX, nodeX - 1);
+      }
+    } else {
+      // TODO(jacobr): implement RTL case.
+    }
+
   }
 
   /**
