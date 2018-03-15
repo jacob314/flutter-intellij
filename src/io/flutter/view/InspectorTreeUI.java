@@ -219,7 +219,8 @@ class InspectorTreeUI extends WideSelectionTreeUI {
 
       leftX = getRowX(row, depth - 1) - getRightChildIndent() + insets.left;
       nodeX = isLeaf ? getRowX(row, depth) - leafChildLineInset:
-              getRowX(row, depth - 1);;
+              getRowX(row, depth - 1);
+      nodeX += insets.left;
       if(lineY >= clipTop
          && lineY < clipBottom
          && nodeX >= clipLeft
