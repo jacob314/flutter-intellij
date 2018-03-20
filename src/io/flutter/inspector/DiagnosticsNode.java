@@ -52,11 +52,14 @@ public class DiagnosticsNode {
   private Location location;
   private DiagnosticsNode parent;
 
+  private final InspectorObjectGroup objectGroup;
+
   private CompletableFuture<String> propertyDocFuture;
 
-  public DiagnosticsNode(JsonObject json, InspectorService inspectorService) {
-    this.inspectorService = inspectorService;
+  public DiagnosticsNode(JsonObject json, InspectorService inspectorService, InspectorObjectGroup objectGroup) {
     this.json = json;
+    this.inspectorService = inspectorService;
+    this.objectGroup = objectGroup;
   }
 
   @Override
@@ -571,11 +574,11 @@ public class DiagnosticsNode {
         final JsonArray jsonArray = json.get("children").getAsJsonArray();
         final ArrayList<DiagnosticsNode> nodes = new ArrayList<>();
         for (JsonElement element : jsonArray) {
-          nodes.add(new DiagnosticsNode(element.getAsJsonObject(), inspectorService));
+          nodes.add(new DiagnosticsNode(element.getAsJsonObject(), inspectorService, objectGroup));
         }
         children = CompletableFuture.completedFuture(nodes);
       } else  if (hasChildren()) {
-        children = inspectorService.getChildren(getDartDiagnosticRef(), isFull());
+        children = inspectorService.getChildren(getDartDiagnosticRef(), isFull(), objectGroup);
       }
       else {
         // Known to have no children so we can provide the children immediately.
@@ -592,8 +595,8 @@ public class DiagnosticsNode {
     return new InspectorInstanceRef(json.get("objectId").getAsString());
   }
 
-  public CompletableFuture<ArrayList<DiagnosticsNode>> getProperties() {
-    final CompletableFuture<ArrayList<DiagnosticsNode>> properties = inspectorService.getProperties(getDartDiagnosticRef());
+  public CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorObjectGroup groupForProperties) {
+    final CompletableFuture<ArrayList<DiagnosticsNode>> properties = inspectorService.getProperties(getDartDiagnosticRef(), groupForProperties);
     return properties.thenApplyAsync((ArrayList<DiagnosticsNode> nodes) -> {
       // Map locations to property nodes where available.
       final Location creationLocation = getCreationLocation();
