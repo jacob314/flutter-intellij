@@ -8,6 +8,7 @@ package io.flutter.view;
 import com.intellij.openapi.project.Project;
 import com.intellij.util.messages.MessageBus;
 import com.intellij.util.messages.Topic;
+import io.flutter.inspector.EvalOnDartLibrary;
 import io.flutter.perf.PerfService;
 import io.flutter.run.daemon.FlutterApp;
 import org.dartlang.vm.service.VmService;
@@ -41,6 +42,18 @@ public class FlutterViewMessages {
     final FlutterDebugNotifier publisher = bus.syncPublisher(FLUTTER_DEBUG_TOPIC);
     assert(app.getFlutterDebugProcess() != null);
     app.setVmServices(vmService, new PerfService(app.getFlutterDebugProcess(), vmService));
+    final EvalOnDartLibrary evalLibrary = new EvalOnDartLibrary(
+      // TODO(jacobr): create a library with handy flutter testing methods.. e.g.
+      // inspect, find("text"), etc
+      "package:flutter/src/widgets/widget_inspector.dart",
+      vmService,
+      app.getPerfService()
+    );
+    app.getFlutterDebugProcess().setDartLibraryForEval(evalLibrary);
+    // TODO(jacobr): evalLibrary also tracks this.
+    app.getPerfService().getCurrentFlutterIsolate((isolateRef) -> {
+      app.getFlutterDebugProcess().setCurrentIsolateId(isolateRef != null ? isolateRef.getId() : null);
+    }, false);
 
     publisher.debugActive(new FlutterDebugEvent(app, vmService));
 

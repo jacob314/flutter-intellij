@@ -128,30 +128,14 @@ public class EvalOnDartLibrary implements Disposable {
     return isolateId;
   }
 
+  CompletableFuture<LibraryRef> getLibraryRef() {
+    return libraryRef;
+  }
+
   public void dispose() {
     myRequestsScheduler.dispose();
     subscription.dispose();
     // TODO(jacobr): complete all pending futures as cancelled?
-  }
-
-  /**
-   * Workaround until the version of the VmService 'eval' method supports
-   * the scope argument.
-   */
-  private void callVmServiceRequest(VmService vmService, String methodName, JsonObject params, EvaluateConsumer consumer) {
-    try {
-      final Method method = ReflectionUtil
-        .getDeclaredMethod(Class.forName("org.dartlang.vm.service.VmServiceBase"), "request", String.class, JsonObject.class,
-                           Consumer.class);
-      if (method == null) {
-        throw new RuntimeException("Cannot find method 'request'");
-      }
-      method.setAccessible(true);
-      method.invoke(vmService, methodName, params, consumer);
-    }
-    catch (IllegalAccessException | InvocationTargetException | ClassNotFoundException e) {
-      throw new RuntimeException((e.toString()));
-    }
   }
 
   public CompletableFuture<InstanceRef> eval(String expression, Map<String, String> scope, InspectorService.ObjectGroup isAlive) {
@@ -169,7 +153,7 @@ public class EvalOnDartLibrary implements Disposable {
 
             @Override
             public void received(ErrorRef response) {
-              LOG.error("Error evaluating expression:\n" + expression + "\nResponse:" + response.getMessage());
+              LOG.info("Error evaluating expression:\n" + expression + "\nResponse:" + response.getMessage());
               future.completeExceptionally(new RuntimeException(response.toString()));
             }
 
@@ -249,7 +233,7 @@ public class EvalOnDartLibrary implements Disposable {
     params.addProperty("targetId", targetId);
     params.addProperty("expression", expression);
     if (scope != null) params.add("scope", convertMapToJsonObject(scope));
-    callVmServiceRequest(vmService, "evaluate", params, consumer);
+    vmService.evaluate(isolateId, targetId, expression, scope, consumer);
   }
 
   private JsonObject convertMapToJsonObject(Map<String, String> map) {
