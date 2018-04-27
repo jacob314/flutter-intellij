@@ -5,32 +5,40 @@
  */
 package io.flutter.run;
 
+import com.google.gson.JsonObject;
 import com.intellij.execution.ExecutionResult;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.execution.ui.RunnerLayoutUi;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.Computable;
 import com.intellij.ui.GuiUtils;
 import com.intellij.ui.content.Content;
+import com.intellij.util.Alarm;
 import com.intellij.xdebugger.XDebugSession;
+import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
+import com.intellij.xdebugger.frame.XStackFrame;
+import com.intellij.xdebugger.frame.XValue;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.DartVmServiceDebugProcessZ;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceStackFrame;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.actions.ReloadFlutterApp;
 import io.flutter.actions.RestartFlutterApp;
+import io.flutter.inspector.EvalOnDartLibrary;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.run.daemon.RunMode;
 import io.flutter.view.FlutterViewMessages;
 import io.flutter.view.OpenFlutterViewAction;
 import org.dartlang.vm.service.VmService;
+import org.dartlang.vm.service.element.Frame;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.lang.reflect.InvocationTargetException;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * A debug process that handles hot reloads for Flutter.
@@ -38,7 +46,7 @@ import java.util.Objects;
  * It's used for both the 'Run' and 'Debug' modes. (We apparently need a debug process even
  * when not debugging in order to support hot reload.)
  */
-public class FlutterDebugProcess extends DartVmServiceDebugProcessZ {
+public class FlutterDebugProcess extends DartVmServiceDebugProcessZ implements Disposable {
   private static final Logger LOG = Logger.getInstance(FlutterDebugProcess.class);
 
   private final @NotNull FlutterApp app;
@@ -58,9 +66,94 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcessZ {
     return app;
   }
 
+  String currentIsolateId;
+
+  EvalOnDartLibrary dartLibraryForEval;
+
+  public String getCurrentIsolateId() {
+    return currentIsolateId;
+  }
+
+  public EvalOnDartLibrary getDartLibraryForEval() {
+    return dartLibraryForEval;
+  }
+
+  public void setDartLibraryForEval(EvalOnDartLibrary library) {
+    dartLibraryForEval = library;
+  }
+
+  @Override
+  public void dispose() {
+    // XXX really dispose.
+    setCurrentIsolateId(null);
+  }
+
+  public class ConsoleDebuggerScope {
+    private int MAX_VALUES = 7;
+    final ArrayList<DartVmServiceValue> values = new ArrayList<>();
+
+    public void add(DartVmServiceValue value) {
+      if (values.size() >= MAX_VALUES) {
+        values.remove(values.size() - 1);
+      }
+      values.add(0, value);
+    }
+
+    void clear() {
+      values.clear();
+    }
+
+    Map<String, String> toMap() {
+     final Map<String, String> map = new HashMap<>();
+     for (int i = 0; i < values.size(); ++i) {
+       // TODO(jacobr): due to Observatory lifetime issues, this value may
+       // have expired so we may need to recompute form a backing store.
+       final DartVmServiceValue value = values.get(i);
+
+       map.put("$" + i, value.getInstanceRef().getId());
+     }
+     return map;
+    }
+  }
+
+  final Map<String, ConsoleDebuggerScope> debuggerScopes = new HashMap<>();
+
+  public void setCurrentIsolateId(String isolateId) {
+    currentIsolateId = isolateId;
+    if (isolateId == null ) {
+      debuggerScopes.clear();
+    } else {
+      debuggerScopes.putIfAbsent(isolateId, new ConsoleDebuggerScope());
+    }
+  }
+
+
+  public ConsoleDebuggerScope getDebuggerScope(String isolateId) {
+    return debuggerScopes.get(isolateId);
+  }
+
+  public ConsoleDebuggerScope getDebuggerScope() {
+    final XStackFrame frame = getSession().getCurrentStackFrame();
+    if (frame instanceof DartVmServiceStackFrame) {
+      final DartVmServiceStackFrame dartStackFrame = (DartVmServiceStackFrame)frame;
+      setCurrentIsolateId(dartStackFrame.getIsolateId());
+    }
+    return currentIsolateId != null ? debuggerScopes.get(currentIsolateId) : null;
+  }
+
+  @Nullable
+  public XDebuggerEvaluator getEvaluator() {
+    XStackFrame frame = getSession().getCurrentStackFrame();
+    if (frame== null) {
+      return new FlutterVmServiceEvaluator(this);
+    }
+    return frame == null ? null : frame.getEvaluator();
+  }
+
   @Override
   protected void onVmConnected(@NotNull VmService vmService) {
     app.setFlutterDebugProcess(this);
+    debuggerScopes.clear();
     FlutterViewMessages.sendDebugActive(getSession().getProject(), app, vmService);
   }
 

@@ -1031,6 +1031,18 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         getTreeModel().nodeChanged(selectedNode.getParent());
       }
     }
+    final DiagnosticsNode diagnostic = TreeUtils.maybeGetDiagnostic(newSelection);
+    if (diagnostic != null) {
+
+      diagnostic.safeWhenComplete(diagnostic.getInspectorService().toDartVmServiceValue(
+        diagnostic.getValueRef()), (value, throwable) -> {
+        if (throwable != null) {
+          // Log but not fatal. XXX
+          return;
+        }
+        getInspectorService().getDebugProcess().getDebuggerScope().add(value);
+      });
+    }
     selectedNode = newSelection;
     animateTo(selectedNode);
 
@@ -1156,8 +1168,13 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   private ActionGroup createTreePopupActions() {
     final DefaultActionGroup group = new DefaultActionGroup();
     final ActionManager actionManager = ActionManager.getInstance();
+    // TODO(jacobr): hide this option when it is unavailable.
     group.add(actionManager.getAction(InspectorActions.JUMP_TO_SOURCE));
     group.add(actionManager.getAction(InspectorActions.JUMP_TO_TYPE_SOURCE));
+    group.add(actionManager.getAction(InspectorActions.INSPECT_WITH_DEBUGGER));
+    if (treeType == InspectorService.FlutterTreeType.widget) {
+      group.add(actionManager.getAction(InspectorActions.INSPECT_ELEMENT_WITH_DEBUGGER));
+    }
     return group;
   }
 

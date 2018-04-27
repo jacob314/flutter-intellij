@@ -128,6 +128,10 @@ public class EvalOnDartLibrary implements Disposable {
     return isolateId;
   }
 
+  CompletableFuture<LibraryRef> getLibraryRef() {
+    return libraryRef;
+  }
+
   public void dispose() {
     myRequestsScheduler.dispose();
     subscription.dispose();
