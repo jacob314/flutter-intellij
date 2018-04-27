@@ -10,6 +10,7 @@ import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.xdebugger.XDebugSession;
 import com.jetbrains.lang.dart.ide.runner.ObservatoryConnector;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.server.vmService.DartVmServiceDebugProcess;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.run.FlutterPopFrameAction;
@@ -28,8 +29,9 @@ public class TestDebugProcess extends DartVmServiceDebugProcess {
                           @NotNull ExecutionResult executionResult,
                           @NotNull DartUrlResolver dartUrlResolver,
                           @NotNull ObservatoryConnector connector,
-                          @NotNull PositionMapper mapper) {
-    super(executionEnvironment, session, executionResult, dartUrlResolver, connector, mapper);
+                          @NotNull PositionMapper mapper,
+                          FlutterApp flutterApp) {
+    super(executionEnvironment, session, executionResult, dartUrlResolver, connector, mapper, flutterApp);
     this.connector = connector;
   }
 

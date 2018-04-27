@@ -12,6 +12,7 @@ import com.google.gson.JsonObject;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectUtil;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.util.ui.JBRectangle;
 import com.intellij.xdebugger.XSourcePosition;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import io.flutter.server.vmService.frame.DartVmServiceValue;
@@ -25,7 +26,9 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
+import java.awt.*;
 import java.util.*;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
@@ -135,6 +138,26 @@ public class DiagnosticsNode {
    */
   public String getDescription() {
     return getStringMember("description");
+  }
+
+  /**
+   * Returns a description with a short summary of the node itself not
+   * including children or properties.
+   * <p>
+   * `parentConfiguration` specifies how the parent is rendered as text art.
+   * For example, if the parent does not line break between properties, the
+   * description of a property should also be a single line if possible.
+   */
+  public Rectangle getBoundingBox() {
+    if (!json.has("boundingBox")) {
+      return null;
+    }
+    JsonObject box = json.getAsJsonObject("boundingBox");
+    return new Rectangle((int)box.getAsJsonPrimitive("x").getAsDouble(),
+                         (int)box.getAsJsonPrimitive("y").getAsDouble(),
+                         (int)box.getAsJsonPrimitive("width").getAsDouble(),
+                         (int)box.getAsJsonPrimitive("height").getAsDouble()
+                         );
   }
 
   /**
@@ -668,7 +691,7 @@ public class DiagnosticsNode {
   private CompletableFuture<String> createPropertyDocFurure() {
     final DiagnosticsNode parent = getParent();
     if (parent != null) {
-      return inspectorService.toDartVmServiceValueForSourceLocation(parent.getValueRef())
+      return inspectorService.toDartVmServiceValue(parent.getValueRef())
         .thenComposeAsync((DartVmServiceValue vmValue) -> {
           if (vmValue == null) {
             return CompletableFuture.completedFuture(null);

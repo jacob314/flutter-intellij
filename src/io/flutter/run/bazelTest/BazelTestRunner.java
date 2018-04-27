@@ -34,6 +34,7 @@ import com.jetbrains.lang.dart.ide.runner.ObservatoryConnector;
 import com.jetbrains.lang.dart.sdk.DartSdkLibUtil;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.run.PositionMapper;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.settings.FlutterSettings;
 import io.flutter.utils.StdoutJsonParser;
 import org.apache.commons.lang.StringUtils;
@@ -90,7 +91,7 @@ public class BazelTestRunner extends GenericProgramRunner {
       @Override
       @NotNull
       public XDebugProcess start(@NotNull final XDebugSession session) {
-        return new BazelTestDebugProcess(env, session, executionResult, resolver, connector, mapper);
+        return new BazelTestDebugProcess(env, session, executionResult, resolver, connector, mapper, null);
       }
     });
 

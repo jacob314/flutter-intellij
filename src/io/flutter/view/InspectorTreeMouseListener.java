@@ -54,11 +54,11 @@ class InspectorTreeMouseListener extends MouseAdapter {
       // A double click triggers forcing changing the subtree root.
       if (event.getClickCount() == 2) {
         if (panel.isSummaryTree) {
-          panel.applyNewSelection(diagnostic, diagnostic, true);
+          panel.applyNewSelection(new InspectorPanel.InspectorSelection(diagnostic, diagnostic), true, true);
         }
         else if (panel.parentTree != null) {
           panel.parentTree.applyNewSelection(
-            panel.firstAncestorInParentTree(node), diagnostic, true);
+            new InspectorPanel.InspectorSelection(panel.firstAncestorInParentTree(node), diagnostic), true, true);
         }
       }
     }

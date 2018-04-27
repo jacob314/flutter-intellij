@@ -11,13 +11,17 @@ import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
 import com.intellij.xdebugger.frame.XCompositeNode;
 import com.intellij.xdebugger.frame.XStackFrame;
 import com.intellij.xdebugger.frame.XValueChildrenList;
+import io.flutter.server.vmService.ChildrenListBuilder;
 import io.flutter.server.vmService.DartVmServiceDebugProcess;
+import io.flutter.server.vmService.VmServiceWrapper;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 public class DartVmServiceStackFrame extends XStackFrame {
 
@@ -96,7 +100,7 @@ public class DartVmServiceStackFrame extends XStackFrame {
   @Override
   public void computeChildren(@NotNull final XCompositeNode node) {
     if (myException != null) {
-      final DartVmServiceValue exception = new DartVmServiceValue(myDebugProcess, myIsolateId, "exception", myException, null, null, true);
+      final DartVmServiceValue exception = new DartVmServiceValue(myDebugProcess, myIsolateId, "exception", myException, null, null, null,true, null);
       node.addChildren(XValueChildrenList.singleton(exception), false);
     }
 
@@ -158,9 +162,10 @@ public class DartVmServiceStackFrame extends XStackFrame {
     });
   }
 
-  private void addVars(@NotNull final XCompositeNode node, @NotNull final ElementList<BoundVariable> vars) {
-    final XValueChildrenList childrenList = new XValueChildrenList(vars.size());
+  private CompletableFuture<?> addVars(@NotNull final XCompositeNode node, @NotNull final ElementList<BoundVariable> vars) {
+    final ChildrenListBuilder childrenListBuilder = new ChildrenListBuilder(vars.size());
 
+    VmServiceWrapper vmService = myDebugProcess.getVmServiceWrapper();
     for (BoundVariable var : vars) {
       final InstanceRef value = var.getValue();
       if (value != null) {
@@ -168,11 +173,10 @@ public class DartVmServiceStackFrame extends XStackFrame {
           "this".equals(var.getName())
           ? null
           : new DartVmServiceValue.LocalVarSourceLocation(myVmFrame.getLocation().getScript(), var.getDeclarationTokenPos());
-        childrenList.add(new DartVmServiceValue(myDebugProcess, myIsolateId, var.getName(), value, varLocation, null, false));
+        childrenListBuilder.add(vmService.createVmServiceValue(myIsolateId, var.getName(), value, varLocation, null, false));
       }
     }
-
-    node.addChildren(childrenList, true);
+    return childrenListBuilder.build(node, true);
   }
 
   @Nullable

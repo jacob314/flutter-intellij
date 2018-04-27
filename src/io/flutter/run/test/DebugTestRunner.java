@@ -24,6 +24,7 @@ import com.intellij.xdebugger.XDebuggerManager;
 import com.jetbrains.lang.dart.ide.runner.ObservatoryConnector;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.run.PositionMapper;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.sdk.FlutterSdk;
 import io.flutter.settings.FlutterSettings;
 import io.flutter.utils.StdoutJsonParser;
@@ -80,7 +81,7 @@ public class DebugTestRunner extends GenericProgramRunner {
       @Override
       @NotNull
       public XDebugProcess start(@NotNull final XDebugSession session) {
-        return new TestDebugProcess(env, session, executionResult, resolver, connector, mapper);
+        return new TestDebugProcess(env, session, executionResult, resolver, connector, mapper, null);
       }
     });
 

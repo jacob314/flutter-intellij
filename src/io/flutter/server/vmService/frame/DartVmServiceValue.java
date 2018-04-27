@@ -1,23 +1,45 @@
 package io.flutter.server.vmService.frame;
 
+import com.intellij.debugger.ui.tree.render.CustomPopupFullValueEvaluator;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.colors.TextAttributesKey;
 import com.intellij.openapi.util.Ref;
 import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.wm.impl.status.TextPanel;
+import com.intellij.ui.Colors;
 import com.intellij.ui.LayeredIcon;
+import com.intellij.ui.ScrollPaneFactory;
+import com.intellij.ui.TextComponent;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.frame.*;
 import com.intellij.xdebugger.frame.presentation.XKeywordValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XNumericValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XStringValuePresentation;
-import io.flutter.server.vmService.DartVmServiceDebugProcess;
-import io.flutter.server.vmService.VmServiceConsumers;
+import com.intellij.xdebugger.frame.presentation.XValuePresentation;
+import com.sun.org.apache.xpath.internal.operations.Bool;
+import icons.FlutterIcons;
+import io.flutter.editor.FlutterMaterialIcons;
+import io.flutter.inspector.DebuggerMetadata;
+import io.flutter.inspector.DiagnosticsNode;
+import io.flutter.inspector.InspectorInstanceRef;
+import io.flutter.inspector.InspectorService;
+import io.flutter.run.FlutterDebugProcess;
+import io.flutter.server.vmService.*;
+import io.flutter.utils.ColorIconMaker;
+import io.flutter.view.FlutterView;
+import io.flutter.view.InspectorPanel;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
+import org.intellij.images.ui.ImageComponent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 // TODO: implement some combination of XValue.getEvaluationExpression() /
 // XValue.calculateEvaluationExpression() in order to support evaluate expression in variable values.
@@ -31,6 +53,8 @@ public class DartVmServiceValue extends XNamedValue {
     new LayeredIcon(AllIcons.Nodes.Field, AllIcons.Nodes.StaticMark, AllIcons.Nodes.FinalMark);
 
   @NotNull private final DartVmServiceDebugProcess myDebugProcess;
+  static final ColorIconMaker colorIconMaker = new ColorIconMaker();
+
   @NotNull private final String myIsolateId;
   @NotNull private final InstanceRef myInstanceRef;
   @Nullable private final LocalVarSourceLocation myLocalVarSourceLocation;
@@ -38,6 +62,8 @@ public class DartVmServiceValue extends XNamedValue {
   private final boolean myIsException;
 
   private final Ref<Integer> myCollectionChildrenAlreadyShown = new Ref<>(0);
+  private final DebuggerMetadata myInspectorMedata;
+  private final String myEvaluationExpression;
 
   public DartVmServiceValue(@NotNull final DartVmServiceDebugProcess debugProcess,
                             @NotNull final String isolateId,
@@ -45,7 +71,9 @@ public class DartVmServiceValue extends XNamedValue {
                             @NotNull final InstanceRef instanceRef,
                             @Nullable final LocalVarSourceLocation localVarSourceLocation,
                             @Nullable final FieldRef fieldRef,
-                            boolean isException) {
+                            @Nullable DebuggerMetadata inspectorMetadata,
+                            boolean isException,
+                            @Nullable String evaluationExpression) {
     super(name);
     myDebugProcess = debugProcess;
     myIsolateId = isolateId;
@@ -53,15 +81,43 @@ public class DartVmServiceValue extends XNamedValue {
     myLocalVarSourceLocation = localVarSourceLocation;
     myFieldRef = fieldRef;
     myIsException = isException;
+    myInspectorMedata = inspectorMetadata;
+    myEvaluationExpression = evaluationExpression;
+  }
+
+  /**
+   * @return expression which evaluates to the current value
+   */
+  @Nullable
+  public String getEvaluationExpression() {
+    return myEvaluationExpression;
   }
 
   @Override
   public boolean canNavigateToSource() {
+    if (myInspectorMedata != null && myInspectorMedata.hasCreationLocation()) {
+      return true;
+    }
+    final InspectorService service = getInspectorService();
     return myLocalVarSourceLocation != null || myFieldRef != null;
   }
 
   @Override
   public void computeSourcePosition(@NotNull final XNavigatable navigatable) {
+    if (myInspectorMedata != null && myInspectorMedata.hasCreationLocation()) {
+      final InspectorService inspectorService = getInspectorService();
+      if (inspectorService != null) {
+        inspectorService.createObjectGroup("dummy").getCreationLocation(myInstanceRef).
+        whenCompleteAsync(((location, throwable) -> {
+          if (throwable != null || location == null) {
+            navigatable.setSourcePosition(null);
+            return;
+          }
+          navigatable.setSourcePosition(location.getXSourcePosition());
+        }));
+        return;
+      }
+    }
     if (myLocalVarSourceLocation != null) {
       reportSourcePosition(myDebugProcess, navigatable, myIsolateId, myLocalVarSourceLocation.myScriptRef,
                            myLocalVarSourceLocation.myTokenPos);
@@ -184,6 +240,16 @@ public class DartVmServiceValue extends XNamedValue {
     return AllIcons.Debugger.Value;
   }
 
+  /**
+   * May return null if the InspectorService is not yet available due to
+   * the application load still being in progress or the current isolate not
+   * being the Flutter UI isolate.
+   */
+  private InspectorService getInspectorService() {
+    InspectorService service = myDebugProcess.getApp().getInspectorService().getNow(null);
+    return myIsolateId.equals(service.getIsolateId()) ? service : null;
+  }
+
   private boolean computeVarHavingStringValuePresentation(@NotNull final XValueNode node) {
     // getValueAsString() is provided for the instance kinds: Null, Bool, Double, Int, String (value may be truncated), Float32x4, Float64x2, Int32x4, StackTrace
     switch (myInstanceRef.getKind()) {
@@ -211,9 +277,46 @@ public class DartVmServiceValue extends XNamedValue {
         node.setPresentation(getIcon(), myInstanceRef.getClassRef().getName(), "", true);
         break;
       default:
+        ClassRef classRef = myInstanceRef.getClassRef();
+        switch (classRef.getName()) {
+          case "Color": {
+            int red = getIntProperty("red");
+            int green = getIntProperty("green");
+            int blue = getIntProperty("blue");
+            int alpha = getIntProperty("alpha");
+            final Color color = new Color(red, green, blue, alpha);
+            String value = alpha == 255 ? String.format("#%02x%02x%02x", red, green, blue) : String.format("#%02x%02x%02x%02x", alpha, red, green, blue);
+            node.setPresentation(colorIconMaker.getCustomIcon(color), myInstanceRef.getClassRef().getName(), value, true);
+            return true;
+          }
+
+          case "IconData": {
+            // IconData(U+0E88F)
+            final int codePoint = getIntProperty("codePoint");
+            if (codePoint > 0) {
+              final Icon icon = FlutterMaterialIcons.getMaterialIconForHex(String.format("%1$04x", codePoint));
+              if (icon != null) {
+                node.setPresentation(icon, myInstanceRef.getClassRef().getName(), "SOME ICON", true);
+                return true;
+              }
+            }
+            break;
+          }
+        }
         return false;
     }
     return true;
+  }
+
+  private int getIntProperty(String propertyName) {
+    if (myInspectorMedata == null || !myInspectorMedata.containsKey(propertyName)) {
+      return 0;
+    }
+    try {
+      return Integer.parseInt(myInspectorMedata.get(propertyName).getValueAsString());
+    } catch (Exception e) {
+      return 0;
+    }
   }
 
   private void addFullStringValueEvaluator(@NotNull final XValueNode node, @NotNull final InstanceRef stringInstanceRef) {
@@ -322,21 +425,106 @@ public class DartVmServiceValue extends XNamedValue {
       computeCollectionChildren(node);
     }
     else {
-      myDebugProcess.getVmServiceWrapper().getObject(myIsolateId, myInstanceRef.getId(), new GetObjectConsumer() {
-        @Override
-        public void received(Obj instance) {
-          addFields(node, ((Instance)instance).getFields());
+      InspectorService inspectorService = getInspectorService();
+      CompletableFuture<?> readyForMoreChildren = CompletableFuture.completedFuture(null);
+      if (myInspectorMedata != null) {
+        if (myInspectorMedata.isInspectable()) {
+          node.addChildren(XValueChildrenList.singleton(new XNamedValue(myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element ? "Widget members" : "") {
+            @Override
+
+            public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+              node.setPresentation(FlutterIcons.Flutter, new XValuePresentation() {
+                @Override
+                public void renderValue(@NotNull XValueTextRenderer renderer) {
+                }
+
+                @Override
+                public String getSeparator() {
+                  return "";
+                }
+              }, false);
+              node.setFullValueEvaluator(new XFullValueEvaluator("Reveal in Flutter Inspector Window") {
+                @Override
+                public void startEvaluation(@NotNull XFullValueEvaluationCallback callback) {
+                  FlutterView.autoActivateToolWindow(myDebugProcess.getApp().getProject());
+                  inspectorService.createObjectGroup("ignored").setSelection(getInstanceRef(), false, false);
+                  // TODO(jacobr): is there a better client we can use than XFullValueEvaluator given
+                  callback.evaluated("Revealed in Inspector Panel");
+                }
+                public boolean isShowValuePopup() {
+                  // TODO(jacobr): we should show a popup explaining why the value can't be
+                  // inspected if something went wrong such as the Widget no longer being part
+                  // of the tree.
+                  return false;
+                }
+              });
+            }
+          }), false);
+          if (myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element) {
+            readyForMoreChildren = myDebugProcess.getVmServiceWrapper().getInstance(myInspectorMedata.getWidget(), myIsolateId).thenComposeAsync((instance) -> {
+               return addFields(node, instance.getFields(), false);
+            });
+          }
+        }
+      }
+
+      readyForMoreChildren.whenCompleteAsync((v, t) -> {
+        // it is fine if readyForMoreChildren completed exceptionally.
+        if (myInspectorMedata != null && myInspectorMedata.isInspectable()) {
+          node.addChildren(XValueChildrenList.singleton(new XNamedValue(myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element ? "Element members " : "") {
+            @Override
+
+            public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+              node.setPresentation(FlutterIcons.Assets, new XValuePresentation() {
+                @Override
+                public void renderValue(@NotNull XValueTextRenderer renderer) {
+                }
+
+                @Override
+                public String getSeparator() {
+                  return "";
+                }
+              }, false);
+              node.setFullValueEvaluator(new DartCustomPopupEvaluator<BufferedImage>("Show Screenshot", myDebugProcess) {
+                @Override
+                protected CompletableFuture<BufferedImage> getData() {
+                  InspectorService.ObjectGroup group = inspectorService.createObjectGroup("node_screenshots");
+                  return group.toInspectorInstanceRef(myInstanceRef).thenComposeAsync((InspectorInstanceRef inspectorRef) -> group.getScreenshot(inspectorRef, 500, 500));
+                }
+
+                @Override
+                protected JComponent createComponent(BufferedImage image) {
+                  if (image == null) {
+                    return null;
+                  }
+                  final ImageComponent imageComponent = new ImageComponent();
+                  imageComponent.setAutoscrolls(true);
+                  imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
+                  imageComponent.getDocument().setValue(image);
+                  imageComponent.setPreferredSize(new Dimension(image.getWidth(), image.getHeight()));
+                  return imageComponent;
+                }
+              });
+            }
+          }), false);
         }
 
-        @Override
-        public void received(Sentinel sentinel) {
-          node.setErrorMessage(sentinel.getValueAsString());
-        }
+        myDebugProcess.getVmServiceWrapper().getObject(myIsolateId, myInstanceRef.getId(), new GetObjectConsumer() {
+          @Override
+          public void received(Obj instance) {
+            addFields(node, ((Instance)instance).getFields(), true);
+          }
 
-        @Override
-        public void onError(RPCError error) {
-          node.setErrorMessage(error.getMessage());
-        }
+          @Override
+          public void received(Sentinel sentinel) {
+            node.setErrorMessage(sentinel.getValueAsString());
+          }
+
+          @Override
+          public void onError(RPCError error) {
+            node.setErrorMessage(error.getMessage());
+          }
+        });
       });
     }
   }
@@ -348,8 +536,9 @@ public class DartVmServiceValue extends XNamedValue {
     myDebugProcess.getVmServiceWrapper().getCollectionObject(myIsolateId, myInstanceRef.getId(), offset, count, new GetObjectConsumer() {
       @Override
       public void received(Obj instance) {
+        CompletableFuture<?> childrenReady = CompletableFuture.completedFuture(null);
         if (isListKind(myInstanceRef.getKind())) {
-          addListChildren(node, ((Instance)instance).getElements());
+          childrenReady = addListChildren(node, ((Instance)instance).getElements());
         }
         else if (myInstanceRef.getKind() == InstanceKind.Map) {
           addMapChildren(node, ((Instance)instance).getAssociations());
@@ -358,11 +547,13 @@ public class DartVmServiceValue extends XNamedValue {
           assert false : myInstanceRef.getKind();
         }
 
-        myCollectionChildrenAlreadyShown.set(myCollectionChildrenAlreadyShown.get() + count);
+        childrenReady.whenCompleteAsync((v, t) -> {
+          myCollectionChildrenAlreadyShown.set(myCollectionChildrenAlreadyShown.get() + count);
 
-        if (offset + count < myInstanceRef.getLength()) {
-          node.tooManyChildren(myInstanceRef.getLength() - offset - count);
-        }
+          if (offset + count < myInstanceRef.getLength()) {
+            node.tooManyChildren(myInstanceRef.getLength() - offset - count);
+          }
+        });
       }
 
       @Override
@@ -377,18 +568,20 @@ public class DartVmServiceValue extends XNamedValue {
     });
   }
 
-  private void addListChildren(@NotNull final XCompositeNode node, @Nullable final ElementList<InstanceRef> listElements) {
+  private CompletableFuture<?> addListChildren(@NotNull final XCompositeNode node, @Nullable final ElementList<InstanceRef> listElements) {
     if (listElements == null) {
       node.addChildren(XValueChildrenList.EMPTY, true);
-      return;
+      return CompletableFuture.completedFuture(null);
     }
 
-    final XValueChildrenList childrenList = new XValueChildrenList(listElements.size());
+    final ChildrenListBuilder childrenList = new ChildrenListBuilder(listElements.size());
     int index = myCollectionChildrenAlreadyShown.get();
+
+    final VmServiceWrapper vmService = myDebugProcess.getVmServiceWrapper();
     for (InstanceRef listElement : listElements) {
-      childrenList.add(new DartVmServiceValue(myDebugProcess, myIsolateId, String.valueOf(index++), listElement, null, null, false));
+      childrenList.add(vmService.createVmServiceValue(myIsolateId, String.valueOf(index++), listElement, null, null, false));
     }
-    node.addChildren(childrenList, true);
+    return childrenList.build(node, true);
   }
 
   private void addMapChildren(@NotNull final XCompositeNode node, @NotNull final ElementList<MapAssociation> mapAssociations) {
@@ -407,11 +600,18 @@ public class DartVmServiceValue extends XNamedValue {
 
         @Override
         public void computeChildren(@NotNull XCompositeNode node) {
-          final DartVmServiceValue key = new DartVmServiceValue(myDebugProcess, myIsolateId, "key", keyInstanceRef, null, null, false);
-          final DartVmServiceValue value =
-            new DartVmServiceValue(myDebugProcess, myIsolateId, "value", valueInstanceRef, null, null, false);
-          node.addChildren(XValueChildrenList.singleton(key), false);
-          node.addChildren(XValueChildrenList.singleton(value), true);
+          final VmServiceWrapper vmService = myDebugProcess.getVmServiceWrapper();
+
+          final CompletableFuture<DartVmServiceValue> key = vmService.createVmServiceValue(myIsolateId, "key", keyInstanceRef, null, null, false);
+          final CompletableFuture<DartVmServiceValue> value =
+            vmService.createVmServiceValue(myIsolateId, "value", valueInstanceRef, null, null, false);
+          CompletableFuture.allOf(key, value).whenCompleteAsync((v, t) -> {
+            if (t != null) {
+              return;
+            }
+            node.addChildren(XValueChildrenList.singleton(key.getNow(null)), false);
+            node.addChildren(XValueChildrenList.singleton(value.getNow(null)), true);
+          });
         }
       });
     }
@@ -419,16 +619,17 @@ public class DartVmServiceValue extends XNamedValue {
     node.addChildren(childrenList, true);
   }
 
-  private void addFields(@NotNull final XCompositeNode node, @NotNull final ElementList<BoundField> fields) {
-    final XValueChildrenList childrenList = new XValueChildrenList(fields.size());
+  private CompletableFuture<?> addFields(@NotNull final XCompositeNode node, @NotNull final ElementList<BoundField> fields, boolean last) {
+    final ChildrenListBuilder childrenList = new ChildrenListBuilder(fields.size());
+    final VmServiceWrapper vmService = myDebugProcess.getVmServiceWrapper();
     for (BoundField field : fields) {
       final InstanceRef value = field.getValue();
       if (value != null) {
         childrenList
-          .add(new DartVmServiceValue(myDebugProcess, myIsolateId, field.getDecl().getName(), value, null, field.getDecl(), false));
+          .add(vmService.createVmServiceValue(myIsolateId, field.getDecl().getName(), value, null, field.getDecl(), false));
       }
     }
-    node.addChildren(childrenList, true);
+    return childrenList.build(node, last);
   }
 
   @NotNull
@@ -477,7 +678,7 @@ public class DartVmServiceValue extends XNamedValue {
     return myInstanceRef;
   }
 
-  static class LocalVarSourceLocation {
+  public static class LocalVarSourceLocation {
     @NotNull private final ScriptRef myScriptRef;
     private final int myTokenPos;
 
