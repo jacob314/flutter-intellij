@@ -14,17 +14,23 @@ import com.intellij.util.ReflectionUtil;
 import com.intellij.xdebugger.XSourcePosition;
 import io.flutter.server.vmService.DartVmServiceDebugProcess;
 import io.flutter.perf.PerfService;
+import io.flutter.server.vmService.VmServiceWrapper;
 import io.flutter.utils.StreamSubscription;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.consumer.Consumer;
 import org.dartlang.vm.service.consumer.EvaluateConsumer;
 import org.dartlang.vm.service.consumer.GetIsolateConsumer;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
+import org.dartlang.vm.service.consumer.ServiceExtensionConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
+import sun.misc.BASE64Decoder;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -33,6 +39,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public class EvalOnDartLibrary implements Disposable {
   private final StreamSubscription<IsolateRef> subscription;
+  private final VmServiceWrapper vmServiceWrapper;
   private String isolateId;
   private final VmService vmService;
   @SuppressWarnings("FieldCanBeLocal") private final PerfService perfService;
@@ -106,9 +113,10 @@ public class EvalOnDartLibrary implements Disposable {
     return response;
   }
 
-  public EvalOnDartLibrary(String libraryName, VmService vmService, PerfService perfService) {
+  public EvalOnDartLibrary(String libraryName, VmService vmService, VmServiceWrapper vmServiceWrapper, PerfService perfService) {
     this.libraryName = libraryName;
     this.vmService = vmService;
+    this.vmServiceWrapper = vmServiceWrapper;
     this.perfService = perfService;
     this.myRequestsScheduler = new Alarm(Alarm.ThreadToUse.POOLED_THREAD, this);
     libraryRef = new CompletableFuture<>();
@@ -128,30 +136,36 @@ public class EvalOnDartLibrary implements Disposable {
     return isolateId;
   }
 
+  CompletableFuture<LibraryRef> getLibraryRef() {
+    return libraryRef;
+  }
+
   public void dispose() {
     myRequestsScheduler.dispose();
     subscription.dispose();
     // TODO(jacobr): complete all pending futures as cancelled?
   }
 
-  /**
-   * Workaround until the version of the VmService 'eval' method supports
-   * the scope argument.
-   */
-  private void callVmServiceRequest(VmService vmService, String methodName, JsonObject params, EvaluateConsumer consumer) {
-    try {
-      final Method method = ReflectionUtil
-        .getDeclaredMethod(Class.forName("org.dartlang.vm.service.VmServiceBase"), "request", String.class, JsonObject.class,
-                           Consumer.class);
-      if (method == null) {
-        throw new RuntimeException("Cannot find method 'request'");
+  public CompletableFuture<JsonObject> invokeServiceMethod(String method) {
+    CompletableFuture<JsonObject> ret = new CompletableFuture<>();
+    libraryRef.whenCompleteAsync((value, ex) -> {
+      if (ex != null) {
+        ret.completeExceptionally(ex);
       }
-      method.setAccessible(true);
-      method.invoke(vmService, methodName, params, consumer);
-    }
-    catch (IllegalAccessException | InvocationTargetException | ClassNotFoundException e) {
-      throw new RuntimeException((e.toString()));
-    }
+      vmService.callServiceExtension(isolateId, method, new ServiceExtensionConsumer() {
+
+        @Override
+        public void onError(RPCError error) {
+          ret.completeExceptionally(new RuntimeException(error.getMessage()));
+        }
+
+        @Override
+        public void received(JsonObject object) {
+          ret.complete(object);
+        }
+      });
+    });
+    return ret;
   }
 
   public CompletableFuture<InstanceRef> eval(String expression, Map<String, String> scope, InspectorService.ObjectGroup isAlive) {
@@ -163,7 +177,7 @@ public class EvalOnDartLibrary implements Disposable {
           new EvaluateConsumer() {
             @Override
             public void onError(RPCError error) {
-              LOG.error(error);
+              LOG.error("Error evaluating expression:\n" + expression + "\nError:" + error.getMessage());
               future.completeExceptionally(new RuntimeException(error.toString()));
             }
 
@@ -187,6 +201,38 @@ public class EvalOnDartLibrary implements Disposable {
       });
       return future;
     });
+  }
+
+  public CompletableFuture<InstanceRef> evalOnVmServiceWrapper(String expression, Map<String, String> scope) {
+    final CompletableFuture<InstanceRef> future = new CompletableFuture<>();
+    libraryRef.thenAcceptAsync((LibraryRef ref) -> {
+      vmServiceWrapper.evaluateInTargetContext(getIsolateId(), ref.getId(), expression, scope,
+        new EvaluateConsumer() {
+          @Override
+          public void onError(RPCError error) {
+            LOG.error("Error evaluating expression:\n" + expression + "\nError:" + error.getMessage());
+            future.completeExceptionally(new RuntimeException(error.toString()));
+          }
+
+          @Override
+          public void received(ErrorRef response) {
+            LOG.error("Error evaluating expression:\n" + expression + "\nResponse:" + response.getMessage());
+            future.completeExceptionally(new RuntimeException(response.toString()));
+          }
+
+          @Override
+          public void received(InstanceRef response) {
+            future.complete(response);
+          }
+
+          @Override
+          public void received(Sentinel response) {
+            future.completeExceptionally(new RuntimeException(response.toString()));
+          }
+        }
+      );
+    });
+    return future;
   }
 
   @SuppressWarnings("unchecked")
@@ -244,12 +290,7 @@ public class EvalOnDartLibrary implements Disposable {
   }
 
   private void evaluateHelper(String isolateId, String targetId, String expression, Map<String, String> scope, EvaluateConsumer consumer) {
-    final JsonObject params = new JsonObject();
-    params.addProperty("isolateId", isolateId);
-    params.addProperty("targetId", targetId);
-    params.addProperty("expression", expression);
-    if (scope != null) params.add("scope", convertMapToJsonObject(scope));
-    callVmServiceRequest(vmService, "evaluate", params, consumer);
+    vmService.evaluate(isolateId, targetId, expression, scope, consumer);
   }
 
   private JsonObject convertMapToJsonObject(Map<String, String> map) {

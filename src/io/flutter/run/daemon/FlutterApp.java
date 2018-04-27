@@ -29,6 +29,7 @@ import com.intellij.util.EventDispatcher;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.jetbrains.lang.dart.ide.runner.ObservatoryConnector;
 import io.flutter.FlutterInitializer;
+import io.flutter.inspector.InspectorService;
 import io.flutter.logging.FlutterLog;
 import io.flutter.perf.PerfService;
 import io.flutter.pub.PubRoot;
@@ -94,6 +95,7 @@ public class FlutterApp {
   private FlutterDebugProcess myFlutterDebugProcess;
   private @Nullable VmService myVmService;
   private PerfService myPerfService;
+  private CompletableFuture<InspectorService> myInspectorService;
 
   private static final Key<FlutterApp> APP_KEY = Key.create("FlutterApp");
 
@@ -526,9 +528,10 @@ public class FlutterApp {
     return myFlutterDebugProcess;
   }
 
-  public void setVmServices(@NotNull VmService vmService, PerfService perfService) {
+  public void setVmServices(@NotNull VmService vmService, PerfService perfService, CompletableFuture<InspectorService> inspectorService) {
     myVmService = vmService;
     myPerfService = perfService;
+    myInspectorService = inspectorService;
 
     myVmService.addVmServiceListener(new VmServiceListenerAdapter() {
       @Override
@@ -575,6 +578,10 @@ public class FlutterApp {
   @Override
   public String toString() {
     return myExecutionEnvironment.toString() + ":" + deviceId();
+  }
+
+  public CompletableFuture<InspectorService> getInspectorService() {
+    return myInspectorService;
   }
 
   public interface FlutterAppListener extends EventListener {

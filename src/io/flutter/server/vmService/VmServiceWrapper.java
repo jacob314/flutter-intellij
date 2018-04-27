@@ -1,5 +1,6 @@
 package io.flutter.server.vmService;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 import com.intellij.execution.ui.ConsoleViewContentType;
 import com.intellij.openapi.Disposable;
@@ -13,20 +14,23 @@ import com.intellij.xdebugger.breakpoints.XBreakpointProperties;
 import com.intellij.xdebugger.breakpoints.XLineBreakpoint;
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
 import com.intellij.xdebugger.frame.XExecutionStack;
+import com.intellij.xdebugger.frame.XNamedValue;
 import com.intellij.xdebugger.frame.XStackFrame;
 import com.jetbrains.lang.dart.DartFileType;
+import io.flutter.inspector.DebuggerMetadata;
+import io.flutter.inspector.InspectorService;
+import io.flutter.run.FlutterDebugProcess;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.server.vmService.frame.*;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.consumer.*;
 import org.dartlang.vm.service.element.*;
+import org.dartlang.vm.service.element.Stack;
 import org.dartlang.vm.service.logging.Logging;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -41,6 +45,7 @@ public class VmServiceWrapper implements Disposable {
   private final IsolatesInfo myIsolatesInfo;
   private final DartVmServiceBreakpointHandler myBreakpointHandler;
   private final Alarm myRequestsScheduler;
+  private final FlutterApp myFlutterApp;
 
   private long myVmServiceReceiverThreadId;
 
@@ -50,12 +55,14 @@ public class VmServiceWrapper implements Disposable {
                           @NotNull final VmService vmService,
                           @NotNull final DartVmServiceListener vmServiceListener,
                           @NotNull final IsolatesInfo isolatesInfo,
-                          @NotNull final DartVmServiceBreakpointHandler breakpointHandler) {
+                          @NotNull final DartVmServiceBreakpointHandler breakpointHandler,
+                          final FlutterApp flutterApp) {
     myDebugProcess = debugProcess;
     myVmService = vmService;
     myVmServiceListener = vmServiceListener;
     myIsolatesInfo = isolatesInfo;
     myBreakpointHandler = breakpointHandler;
+    myFlutterApp = flutterApp;
     myRequestsScheduler = new Alarm(Alarm.ThreadToUse.POOLED_THREAD, this);
   }
 
@@ -475,6 +482,98 @@ public class VmServiceWrapper implements Disposable {
     addRequest(() -> myVmService.getObject(isolateId, objectId, offset, count, consumer));
   }
 
+  public CompletableFuture<Instance> getInstance(InstanceRef instance, String isolateId) {
+    return getObjHelper(instance, isolateId);
+  }
+
+  public CompletableFuture<Library> getLibrary(LibraryRef instance, String isolateId) {
+    return getObjHelper(instance, isolateId);
+  }
+
+  public CompletableFuture<ClassObj> getClass(ClassRef instance, String isolateId) {
+    return getObjHelper(instance, isolateId);
+  }
+
+  public CompletableFuture<Func> getFunc(FuncRef instance, String isolateId) {
+    return getObjHelper(instance, isolateId);
+  }
+
+  public CompletableFuture<Instance> getInstance(CompletableFuture<InstanceRef> instanceFuture, String isolateId) {
+    return instanceFuture.thenComposeAsync((instance) -> getInstance(instance, isolateId));
+  }
+
+  @SuppressWarnings("unchecked")
+  public <T extends Obj> CompletableFuture<T> getObjHelper(ObjRef instance, String isolateId) {
+    final CompletableFuture<T> future = new CompletableFuture<>();
+    getObject(
+      isolateId, instance.getId(), new GetObjectConsumer() {
+        @Override
+        public void onError(RPCError error) {
+          future.completeExceptionally(new RuntimeException(error.toString()));
+        }
+
+        @Override
+        public void received(Obj response) {
+          future.complete((T)response);
+        }
+
+        @Override
+        public void received(Sentinel response) {
+          future.completeExceptionally(new RuntimeException(response.toString()));
+        }
+      }
+    );
+    return future;
+  }
+
+  public CompletableFuture<Map<String, InstanceRef>> getProperties(InstanceRef instanceRef, String isolateId, String propertyNames[]) {
+    final StringBuilder sb = new StringBuilder();
+    final List<String> propertyAccessors = new ArrayList<>();
+    final String objectName = "this";
+    for (String propertyName : propertyNames) {
+      propertyAccessors.add(objectName + "." + propertyName);
+    }
+    sb.append("[");
+    sb.append(Joiner.on(',').join(propertyAccessors));
+    sb.append("]");
+    final Map<String, String> scope = new HashMap<>();
+    scope.put(objectName, instanceRef.getId());
+    CompletableFuture<Map<String, InstanceRef>> ret = new CompletableFuture<>();
+    return getInstance(evaluateInTargetContext(isolateId, instanceRef.getId(), sb.toString()), isolateId).thenApplyAsync(
+      (Instance instance) -> {
+        // We now have an instance object that is a Dart array of all the
+        // property values. Convert it back to a map from property name to
+        // property values.
+
+        final Map<String, InstanceRef> properties = new HashMap<>();
+        final ElementList<InstanceRef> values = instance.getElements();
+        assert (values.size() == propertyNames.length);
+        for (int i = 0; i < propertyNames.length; ++i) {
+          properties.put(propertyNames[i], values.get(i));
+        }
+        return properties;
+      });
+  }
+
+  public CompletableFuture<DartVmServiceValue> createVmServiceValue(String isolateId, String name, InstanceRef instanceRef, DartVmServiceValue.LocalVarSourceLocation localVarSourceLocation, FieldRef fieldRef, boolean isException) {
+    return createVmServiceValue(isolateId, name, instanceRef, localVarSourceLocation, fieldRef, isException, null);
+  }
+
+  private InspectorService getInspectorService(String isolateId) {
+    InspectorService service = myDebugProcess.getApp().getInspectorService().getNow(null);
+    return isolateId.equals(service.getIsolateId()) ? service : null;
+  }
+
+  public CompletableFuture<DartVmServiceValue> createVmServiceValue(String isolateId, String name, InstanceRef instanceRef, DartVmServiceValue.LocalVarSourceLocation localVarSourceLocation, FieldRef fieldRef, boolean isException, String evaluationExpression) {
+    InspectorService inspectorService = getInspectorService(isolateId);
+    final CompletableFuture<DebuggerMetadata> metadata = inspectorService != null ? inspectorService.getDebuggerMetadata(instanceRef) : CompletableFuture.completedFuture(null);
+    CompletableFuture<DartVmServiceValue> ret = new CompletableFuture<>();
+    metadata.whenCompleteAsync((debuggerMetadata, e) -> {
+      ret.complete(new DartVmServiceValue(myDebugProcess, isolateId, name, instanceRef, localVarSourceLocation, fieldRef, debuggerMetadata, isException, evaluationExpression));
+    });
+    return ret;
+  }
+
   public void evaluateInFrame(@NotNull final String isolateId,
                               @NotNull final Frame vmFrame,
                               @NotNull final String expression,
@@ -482,7 +581,12 @@ public class VmServiceWrapper implements Disposable {
     addRequest(() -> myVmService.evaluateInFrame(isolateId, vmFrame.getIndex(), expression, new EvaluateInFrameConsumer() {
       @Override
       public void received(InstanceRef instanceRef) {
-        callback.evaluated(new DartVmServiceValue(myDebugProcess, isolateId, "result", instanceRef, null, null, false));
+        createVmServiceValue(isolateId,"result", instanceRef,null, null, false).whenCompleteAsync((v, e) -> {
+          if (e != null) {
+            return;
+          }
+          callback.evaluated(v);
+        });
       }
 
       @Override
@@ -513,11 +617,52 @@ public class VmServiceWrapper implements Disposable {
   public void evaluateInTargetContext(@NotNull final String isolateId,
                                       @NotNull final String targetId,
                                       @NotNull final String expression,
+                                      Map<String, String> scope,
+                                      @NotNull final EvaluateConsumer consumer) {
+    addRequest(() -> myVmService.evaluate(isolateId, targetId, expression, scope, consumer));
+  }
+
+  CompletableFuture<InstanceRef> evaluateInTargetContext(@NotNull final String isolateId,
+                                      @NotNull final String targetId,
+                                      @NotNull final String expression) {
+    CompletableFuture<InstanceRef> ret = new CompletableFuture<>();
+    addRequest(() -> myVmService.evaluate(isolateId, targetId, expression, new EvaluateConsumer() {
+
+      @Override
+      public void onError(RPCError error) {
+        ret.completeExceptionally(new RuntimeException(error.toString()));
+      }
+
+      @Override
+      public void received(ErrorRef response) {
+        ret.completeExceptionally(new RuntimeException(response.toString()));
+      }
+
+      @Override
+      public void received(InstanceRef response) {
+        ret.complete(response);
+      }
+
+      @Override
+      public void received(Sentinel response) {
+        ret.completeExceptionally(new RuntimeException(response.getValueAsString()));
+      }
+    }));
+    return ret;
+  }
+
+  public void evaluateInTargetContext(@NotNull final String isolateId,
+                                      @NotNull final String targetId,
+                                      @NotNull final String expression,
                                       @NotNull final XDebuggerEvaluator.XEvaluationCallback callback) {
     evaluateInTargetContext(isolateId, targetId, expression, new EvaluateConsumer() {
       @Override
       public void received(InstanceRef instanceRef) {
-        callback.evaluated(new DartVmServiceValue(myDebugProcess, isolateId, "result", instanceRef, null, null, false));
+        createVmServiceValue(isolateId, "result", instanceRef, null, null, false, expression).whenCompleteAsync(
+          (v, t) -> {
+            callback.evaluated(v);
+          }
+        );
       }
 
       @Override

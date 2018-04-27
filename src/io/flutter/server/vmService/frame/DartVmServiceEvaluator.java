@@ -16,10 +16,13 @@ import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.evaluation.ExpressionInfo;
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
 import com.intellij.xdebugger.frame.XValue;
+import io.flutter.inspector.InspectorService;
 import io.flutter.server.vmService.DartVmServiceDebugProcess;
 import com.jetbrains.lang.dart.psi.*;
 import com.jetbrains.lang.dart.util.DartResolveUtil;
 import gnu.trove.THashSet;
+import io.flutter.utils.AsyncUtils;
+import io.flutter.view.FlutterView;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
@@ -28,6 +31,7 @@ import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,9 +51,11 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
     final String isolateId = myDebugProcess.getCurrentIsolateId();
     final Project project = myDebugProcess.getSession().getProject();
     final FileEditorManager manager = FileEditorManager.getInstance(project);
-    PsiElement element = null;
-    PsiFile psiFile = null;
     final List<VirtualFile> libraryFiles = new ArrayList<>();
+    if (isolateId == null) {
+      callback.errorOccurred("No running isolate.");
+      return;
+    }
     // Turn off pausing on exceptions as it is confusing to mouse over an expression
     // and to have that trigger pausing at an exception.
     myDebugProcess.getVmServiceWrapper().setExceptionPauseMode(ExceptionPauseMode.None);
@@ -66,10 +72,119 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
         callback.errorOccurred(errorMessage);
       }
     };
+    final PsiElement element = findElement(expressionPosition, project, manager);
+    PsiFile psiFile = element != null ? element.getContainingFile() : null;
+
+    if (psiFile != null) {
+      libraryFiles.addAll(DartResolveUtil.findLibrary(psiFile));
+    }
+    final DartClass dartClass = element != null ? PsiTreeUtil.getParentOfType(element, DartClass.class) : null;
+    final String dartClassName = dartClass != null ? dartClass.getName() : null;
+
+    myDebugProcess.getVmServiceWrapper().getCachedIsolate(isolateId).whenComplete((isolate, error) -> {
+      if (error != null) {
+        wrappedCallback.errorOccurred(error.getMessage());
+        return;
+      }
+
+      LibraryRef libraryRef = findMatchingLibrary(isolate, libraryFiles);
+      if (psiFile != null && element != null) {
+        final String rawText = psiFile.getText();
+        final int startOffset = element.getTextOffset();
+        final int endOffset =  startOffset + expression.length();
+        final InspectorService service = myDebugProcess.getApp().getInspectorService().getNow(null);
+        // Test if the user is trying to evaluate text that exactly matches
+        // code in the Dart source file. If there is an existing Element in
+        // the running application that matches the widget we should show it.
+        if (service != null && endOffset <= rawText.length() && rawText.substring(startOffset, endOffset).equals(expression)) {
+          final Document document = PsiDocumentManager.getInstance(project).getDocument(psiFile);
+          if (document != null) {
+
+            // No need to dispose this group as no persistent references are created.
+            InspectorService.ObjectGroup group = service.createObjectGroup("temporary");
+
+            final int startLine = document.getLineNumber(startOffset);
+            final int startColumn = startOffset - document.getLineStartOffset(startLine);
+            final int endLine = document.getLineNumber(endOffset);
+            final int endColumn = endOffset - document.getLineStartOffset(endLine);
+
+            CompletableFuture<InstanceRef> refFuture = group
+              .findMatchingElementsForSourceLocation(psiFile.getVirtualFile().getPath(), startLine, startColumn, endLine, endColumn);
+            AsyncUtils.whenCompleteUiThread(refFuture, (instanceRef, t) -> {
+              if (t != null || instanceRef == null || instanceRef.getKind() == InstanceKind.Null) {
+                // Fallback to regular expression evaluation if there is not a
+                // matching widget.
+                evaluateHelper(expression, isolateId, wrappedCallback, dartClassName, libraryRef);
+                return;
+              }
+              // TODO(jacobr): we need an option in the inspector to control
+              // whether setting the selection to match the current hovered
+              // widget is optional.
+              if (FlutterView.isActive(project)) {
+                // If the inspector is active, set its selection to this widget.
+                group.setSelection(instanceRef, false, false);
+              }
+              myDebugProcess.getVmServiceWrapper().createVmServiceValue(
+                isolateId, "widgetFromRunningApp", instanceRef, null, null, false, expression).whenCompleteAsync(
+                (v, ignored) -> {
+                  callback.evaluated(v);
+                }
+              );
+            });
+          }
+          return;
+        }
+      }
+
+      evaluateHelper(expression, isolateId, wrappedCallback, dartClassName, libraryRef);
+    });
+  }
+
+  private void evaluateHelper(@NotNull String expression,
+                              String isolateId,
+                              XEvaluationCallback wrappedCallback,
+                              String dartClassName, LibraryRef libraryRef) {
+    if (dartClassName != null) {
+      myDebugProcess.getVmServiceWrapper().getObject(isolateId, libraryRef.getId(), new GetObjectConsumer() {
+
+        @Override
+        public void onError(RPCError error) {
+          wrappedCallback.errorOccurred(error.getMessage());
+        }
+
+        @Override
+        public void received(Obj response) {
+          Library library = (Library)response;
+          for (ClassRef classRef : library.getClasses()) {
+            if (classRef.getName().equals(dartClassName)) {
+              myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, classRef.getId(), expression, wrappedCallback);
+              return;
+            }
+          }
+
+          // Class not found so just use the library.
+          myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, libraryRef.getId(), expression, wrappedCallback);
+        }
+
+        @Override
+        public void received(Sentinel response) {
+          wrappedCallback.errorOccurred(response.getValueAsString());
+        }
+      });
+    }
+    else {
+      myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, libraryRef.getId(), expression, wrappedCallback);
+    }
+  }
+
+  private PsiElement findElement(XSourcePosition expressionPosition,
+                                 Project project,
+                                 FileEditorManager manager) {
+    PsiFile psiFile;
     if (expressionPosition != null) {
       psiFile = PsiManager.getInstance(project).findFile(expressionPosition.getFile());
       if (psiFile != null) {
-        element = psiFile.findElementAt(expressionPosition.getOffset());
+        return psiFile.findElementAt(expressionPosition.getOffset());
       }
     }
     else {
@@ -84,61 +199,12 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
           psiFile = PsiManager.getInstance(project).findFile(virtualFile);
           if (psiFile != null && fileEditorLocation instanceof TextEditorLocation) {
             TextEditorLocation textEditorLocation = (TextEditorLocation)fileEditorLocation;
-            element = psiFile.findElementAt(textEditor.getEditor().logicalPositionToOffset(textEditorLocation.getPosition()));
+            return psiFile.findElementAt(textEditor.getEditor().logicalPositionToOffset(textEditorLocation.getPosition()));
           }
         }
       }
     }
-
-    if (psiFile != null) {
-      libraryFiles.addAll(DartResolveUtil.findLibrary(psiFile));
-    }
-
-    if (isolateId == null) {
-      wrappedCallback.errorOccurred("No running isolate.");
-      return;
-    }
-    final DartClass dartClass = element != null ? PsiTreeUtil.getParentOfType(element, DartClass.class) : null;
-    final String dartClassName = dartClass != null ? dartClass.getName() : null;
-
-    myDebugProcess.getVmServiceWrapper().getCachedIsolate(isolateId).whenComplete((isolate, error) -> {
-      if (error != null) {
-        wrappedCallback.errorOccurred(error.getMessage());
-        return;
-      }
-      LibraryRef libraryRef = findMatchingLibrary(isolate, libraryFiles);
-      if (dartClassName != null) {
-        myDebugProcess.getVmServiceWrapper().getObject(isolateId, libraryRef.getId(), new GetObjectConsumer() {
-
-          @Override
-          public void onError(RPCError error) {
-            wrappedCallback.errorOccurred(error.getMessage());
-          }
-
-          @Override
-          public void received(Obj response) {
-            Library library = (Library)response;
-            for (ClassRef classRef : library.getClasses()) {
-              if (classRef.getName().equals(dartClassName)) {
-                myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, classRef.getId(), expression, wrappedCallback);
-                return;
-              }
-            }
-
-            // Class not found so just use the library.
-            myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, libraryRef.getId(), expression, wrappedCallback);
-          }
-
-          @Override
-          public void received(Sentinel response) {
-            wrappedCallback.errorOccurred(response.getValueAsString());
-          }
-        });
-      }
-      else {
-        myDebugProcess.getVmServiceWrapper().evaluateInTargetContext(isolateId, libraryRef.getId(), expression, wrappedCallback);
-      }
-    });
+    return null;
   }
 
   private LibraryRef findMatchingLibrary(Isolate isolate, List<VirtualFile> libraryFiles) {
@@ -217,6 +283,9 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
       if (element instanceof DartReference) {
         reference = (DartReference)element;
       }
+      if (element instanceof DartNewExpression) {
+        break;
+      }
 
       element = element.getParent();
       if (element == null ||
@@ -231,13 +300,20 @@ public class DartVmServiceEvaluator extends XDebuggerEvaluator {
     }
 
     if (reference != null) {
-      TextRange textRange = reference.getTextRange();
-      // note<CURSOR>s.text - the whole reference expression is notes.txt, but we must return only notes
-      int endOffset = contextElement.getTextRange().getEndOffset();
-      if (textRange.getEndOffset() != endOffset) {
-        textRange = new TextRange(textRange.getStartOffset(), endOffset);
+      if (reference instanceof DartNewExpression) {
+        // We don't want to evaluate Dart constructors so we just want the
+        // actual class being constructed as that will also match the location
+        PsiElement typeElement = reference.getLastChild().getPrevSibling();
+        return new ExpressionInfo(typeElement.getTextRange(), typeElement.getText(), "class " + typeElement.getText());
+      } else {
+        TextRange textRange = reference.getTextRange();
+        // note<CURSOR>s.text - the whole reference expression is notes.txt, but we must return only notes
+        int endOffset = contextElement.getTextRange().getEndOffset();
+        if (textRange.getEndOffset() != endOffset) {
+          textRange = new TextRange(textRange.getStartOffset(), endOffset);
+        }
+        return new ExpressionInfo(textRange);
       }
-      return new ExpressionInfo(textRange);
     }
 
     PsiElement parent = contextElement.getParent();

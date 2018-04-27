@@ -37,6 +37,7 @@ import com.jetbrains.lang.dart.ide.runner.base.DartDebuggerEditorsProvider;
 import com.jetbrains.lang.dart.ide.runner.server.OpenDartObservatoryUrlAction;
 import io.flutter.FlutterBundle;
 import io.flutter.run.FlutterLaunchMode;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.server.vmService.frame.DartVmServiceEvaluator;
 import io.flutter.server.vmService.frame.DartVmServiceStackFrame;
 import io.flutter.server.vmService.frame.DartVmServiceSuspendContext;
@@ -64,6 +65,7 @@ import java.util.List;
 
 public class DartVmServiceDebugProcess extends XDebugProcess {
   private static final Logger LOG = Logger.getInstance(DartVmServiceDebugProcess.class.getName());
+  protected final @NotNull FlutterApp app;
 
   @Nullable private final ExecutionResult myExecutionResult;
   @NotNull private final DartUrlResolver myDartUrlResolver;
@@ -102,11 +104,11 @@ public class DartVmServiceDebugProcess extends XDebugProcess {
     new OpenDartObservatoryUrlAction(null, () -> myVmConnected && !getSession().isStopped());
 
   public DartVmServiceDebugProcess(@NotNull final ExecutionEnvironment executionEnvironment,
-                                    @NotNull final XDebugSession session,
-                                    @NotNull final ExecutionResult executionResult,
-                                    @NotNull final DartUrlResolver dartUrlResolver,
-                                    @NotNull final ObservatoryConnector connector,
-                                    @NotNull final PositionMapper mapper) {
+                                   @NotNull final XDebugSession session,
+                                   @NotNull final ExecutionResult executionResult,
+                                   @NotNull final DartUrlResolver dartUrlResolver,
+                                   @NotNull final ObservatoryConnector connector,
+                                   @NotNull final PositionMapper mapper, @NotNull FlutterApp app) {
     super(session);
 
     myDebuggingHost = "localhost";
@@ -185,6 +187,7 @@ public class DartVmServiceDebugProcess extends XDebugProcess {
     });
 
     scheduleConnect();
+    this.app = app;
   }
 
   public ExceptionPauseMode getBreakOnExceptionMode() {
@@ -291,7 +294,7 @@ public class DartVmServiceDebugProcess extends XDebugProcess {
     vmService.addVmServiceListener(vmServiceListener);
 
     myVmServiceWrapper =
-      new VmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, (DartVmServiceBreakpointHandler)myBreakpointHandlers[0]);
+      new VmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, (DartVmServiceBreakpointHandler)myBreakpointHandlers[0], app);
     myVmServiceWrapper.handleDebuggerConnected();
 
     myVmConnected = true;
@@ -538,7 +541,7 @@ public class DartVmServiceDebugProcess extends XDebugProcess {
     final DartVmServiceBreakpointHandler breakpointHandler = (DartVmServiceBreakpointHandler)myBreakpointHandlers[0];
 
     myVmOpenSourceLocationListener = vmOpenSourceLocationListener;
-    myVmServiceWrapper = new VmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, breakpointHandler);
+    myVmServiceWrapper = new VmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, breakpointHandler, app);
 
     final ScriptProvider provider =
       (isolateId, scriptId) -> myVmServiceWrapper.getScriptSync(isolateId, scriptId);
@@ -690,6 +693,11 @@ public class DartVmServiceDebugProcess extends XDebugProcess {
       anchor.setVisible(true);
       anchor.toFront();
     }
+  }
+
+  @NotNull
+  public FlutterApp getApp() {
+    return app;
   }
 
   /**
