@@ -41,21 +41,13 @@ import java.util.Objects;
 public class FlutterDebugProcess extends DartVmServiceDebugProcess {
   private static final Logger LOG = Logger.getInstance(FlutterDebugProcess.class);
 
-  private final @NotNull FlutterApp app;
-
   public FlutterDebugProcess(@NotNull FlutterApp app,
                              @NotNull ExecutionEnvironment executionEnvironment,
                              @NotNull XDebugSession session,
                              @NotNull ExecutionResult executionResult,
                              @NotNull DartUrlResolver dartUrlResolver,
                              @NotNull PositionMapper mapper) {
-    super(executionEnvironment, session, executionResult, dartUrlResolver, app.getConnector(), mapper);
-    this.app = app;
-  }
-
-  @NotNull
-  public FlutterApp getApp() {
-    return app;
+    super(executionEnvironment, session, executionResult, dartUrlResolver, app.getConnector(), mapper, app);
   }
 
   @Override

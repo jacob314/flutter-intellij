@@ -152,12 +152,10 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
                                            Disposable parentDisposable,
                                            InspectorService inspectorService) {
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
-    toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
     if (inspectorService != null) {
-      toolbarGroup.addSeparator();
       toolbarGroup.add(registerAction(new ForceRefreshAction(app, inspectorService)));
+      toolbarGroup.addSeparator();
     }
-    toolbarGroup.addSeparator();
     toolbarGroup.add(registerAction(new DebugDrawAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
     toolbarGroup.add(registerAction(new PerformanceOverlayAction(app)));
@@ -352,7 +350,7 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     }
     else {
       whenCompleteUiThread(
-        InspectorService.create(app, app.getFlutterDebugProcess(), app.getVmService()),
+        app.getInspectorService(),
         (InspectorService inspectorService, Throwable throwable) -> {
           if (throwable != null) {
             LOG.warn(throwable);
@@ -407,6 +405,9 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
           onAppChanged(app);
           final PerAppState state = perAppViewState.remove(app);
           if (state != null && state.content != null) {
+            for (InspectorPanel panel : state.inspectorPanels) {
+              panel.dispose();
+            }
             contentManager.removeContent(state.content, true);
           }
           if (perAppViewState.isEmpty()) {
@@ -528,7 +529,13 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
    * Activate the tool window; on app termination, restore any previously active tool window.
    */
   private void autoActivateToolWindow() {
-    final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(myProject);
+    autoActivateToolWindow(myProject);
+  }
+    /**
+     * Activate the tool window; on app termination, restore any previously active tool window.
+     */
+  public static void autoActivateToolWindow(Project project) {
+    final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(project);
     if (!(toolWindowManager instanceof ToolWindowManagerEx)) {
       return;
     }
@@ -539,6 +546,15 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     }
 
     flutterToolWindow.show(null);
+  }
+
+  public static boolean isActive(Project project) {
+    final ToolWindowManager toolWindowManager = ToolWindowManager.getInstance(project);
+    if (!(toolWindowManager instanceof ToolWindowManagerEx)) {
+      return false;
+    }
+    final ToolWindow flutterToolWindow = toolWindowManager.getToolWindow(FlutterView.TOOL_WINDOW_ID);
+    return flutterToolWindow.isVisible();
   }
 }
 
@@ -913,6 +929,8 @@ class OverflowAction extends AnAction implements RightAlignedToolbarAction {
     group.addSeparator();
     group.add(view.registerAction(new AutoHorizontalScrollAction(app, view.shouldAutoHorizontalScroll)));
     group.add(view.registerAction(new HighlightNodesShownInBothTrees(app, view.highlightNodesShownInBothTrees)));
+    group.addSeparator();
+    group.add(view.registerAction(new ToggleInspectModeAction(app)));
 
     return group;
   }

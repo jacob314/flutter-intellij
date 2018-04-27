@@ -4,7 +4,9 @@ import com.google.gson.JsonElement;
 import com.intellij.icons.AllIcons;
 import com.intellij.util.SmartList;
 import com.intellij.xdebugger.frame.*;
+import io.flutter.server.vmService.ChildrenListBuilder;
 import io.flutter.server.vmService.DartVmServiceDebugProcess;
+import io.flutter.server.vmService.VmServiceWrapper;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
@@ -48,17 +50,23 @@ class DartStaticFieldsGroup extends XValueGroup {
 
   @Override
   public void computeChildren(@NotNull final XCompositeNode node) {
+    // TODO(jacobr): this counter could be eliminated if we treated Sentinel
+    // values a little better.
+    // Note this code is not really handling error values returned correctly
+    // as values will just show as pending forever instead of showing an error.
     final AtomicInteger counter = new AtomicInteger(myFieldRefs.size());
-    final XValueChildrenList list = new XValueChildrenList(myFieldRefs.size());
+    final ChildrenListBuilder list = new ChildrenListBuilder(myFieldRefs.size());
 
+    final VmServiceWrapper vmService = myDebugProcess.getVmServiceWrapper();
     for (final FieldRef fieldRef : myFieldRefs) {
-      myDebugProcess.getVmServiceWrapper().getObject(myIsolateId, fieldRef.getId(), new GetObjectConsumer() {
+      vmService.getObject(myIsolateId, fieldRef.getId(), new GetObjectConsumer() {
         @Override
         public void received(Obj field) {
           final InstanceRef instanceRef = ((Field)field).getStaticValue();
           // static field may be not initialized yet, in this case this instanceRef is in fact a Sentinel
           if ("@Instance".equals(instanceRef.getType())) {
-            list.add(new DartVmServiceValue(myDebugProcess, myIsolateId, ((Field)field).getName(), instanceRef, null, fieldRef, false));
+
+            list.add(vmService.createVmServiceValue(myIsolateId, ((Field)field).getName(), instanceRef, null, fieldRef, false));
           }
           else if ("Sentinel".equals(instanceRef.getType())) {
             list.add(new XNamedValue(((Field)field).getName()) {
@@ -81,7 +89,7 @@ class DartStaticFieldsGroup extends XValueGroup {
               node.setErrorMessage("Static fields not initialized yet");
             }
             else {
-              node.addChildren(list, true);
+              list.build(node, true);
             }
           }
         }

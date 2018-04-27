@@ -42,6 +42,14 @@
               text="Jump to Source">
         <keyboard-shortcut keymap="$default" first-keystroke="control DOWN"/>
       </action>
+      <action id="Flutter.InspectWithDebugger" class="io.flutter.inspector.DebuggerInspectAction"
+              text="Inspect with Debugger">
+        <keyboard-shortcut keymap="$default" first-keystroke="control d"/>
+      </action>
+      <action id="Flutter.Screenshot" class="io.flutter.inspector.ScreenshotAction"
+              text="Show Screenshot">
+        <keyboard-shortcut keymap="$default" first-keystroke="control p"/>
+      </action>
     </group>
 
     <group id="Flutter.MainToolbarActions">

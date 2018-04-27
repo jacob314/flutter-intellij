@@ -6,22 +6,36 @@
 package io.flutter.view;
 
 import com.google.common.base.Joiner;
+import com.intellij.ide.ui.UISettings;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Splitter;
+import com.intellij.openapi.ui.popup.Balloon;
+import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.ToolWindowAnchor;
+import com.intellij.openapi.wm.ToolWindowManager;
+import com.intellij.openapi.wm.ToolWindowType;
+import com.intellij.openapi.wm.ex.ToolWindowEx;
 import com.intellij.ui.*;
+import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.content.Content;
+import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.dualView.TreeTableView;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.ui.treeStructure.treetable.ListTreeTableModelOnColumns;
 import com.intellij.util.ui.ColumnInfo;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
 import com.intellij.util.ui.tree.TreeUtil;
 import com.intellij.xdebugger.XSourcePosition;
+import com.intellij.xdebugger.impl.ui.DebuggerUIUtil;
+import icons.FlutterIcons;
 import io.flutter.FlutterBundle;
 import io.flutter.editor.FlutterMaterialIcons;
 import io.flutter.inspector.*;
@@ -30,6 +44,7 @@ import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.*;
 import org.dartlang.vm.service.element.InstanceRef;
 import org.dartlang.vm.service.element.IsolateRef;
+import org.intellij.images.ui.ImageComponent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -44,10 +59,11 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreeNode;
 import javax.swing.tree.TreePath;
 import java.awt.*;
-import java.awt.event.ComponentEvent;
-import java.awt.event.ComponentListener;
+import java.awt.event.*;
+import java.awt.image.BufferedImage;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
+import java.lang.System;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -62,11 +78,13 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    * simulator or high powered native device. The frame rate is set low
    * for now mainly to minimize the risk of unintended consequences.
    */
-  public static final double REFRESH_FRAMES_PER_SECOND = 5.0;
+  public static final double REFRESH_FRAMES_PER_SECOND = 0.1;
+  public static final double MOUSE_FRAMES_PER_SECOND = 1.0;
   // We have to define this because SimpleTextAttributes does not define a
   // value for warnings.
   private static final SimpleTextAttributes WARNING_ATTRIBUTES = new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor.ORANGE);
   private static final Logger LOG = Logger.getInstance(InspectorPanel.class);
+  private static final String MIRRORWINDOW_ID = "Phone Mirror"; /// XXX make id.
   protected final boolean detailsSubtree;
   protected final boolean isSummaryTree;
   /**
@@ -76,8 +94,10 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   protected final InspectorPanel subtreePanel;
   final CustomIconMaker iconMaker = new CustomIconMaker();
   final Splitter treeSplitter;
+  final Splitter treeSplitterDevice;
   final Icon defaultIcon;
   final JBScrollPane treeScrollPane;
+  JPanel tutorialPanel;
   private final InspectorTree myRootsTree;
   @Nullable private final PropertiesPanel myPropertiesPanel;
   private final Computable<Boolean> isApplicable;
@@ -93,6 +113,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    */
   private final boolean legacyMode;
   private final AsyncRateLimiter refreshRateLimiter;
+  private final AsyncRateLimiter hoverRateLimiter;
 
   /**
    * Groups used to manage and cancel requests to load data to display directly
@@ -109,6 +130,11 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    * TODO(jacobr): is there a way we can unify the selection and tree groups?
    */
   private final InspectorObjectGroupManager selectionGroups;
+  private final InspectorObjectGroupManager screenshotGroups;
+
+  private ImageComponent imageComponent;
+  private ToolWindowEx mirrorToolWindow;
+  private ImageContainerPane imageContainerPane; // XXX final.
 
   /**
    * Node being highlighted due to the current hover.
@@ -131,6 +157,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    */
   private boolean visibleToUser = false;
   private boolean highlightNodesShownInBothTrees = false;
+  private CompletableFuture<DiagnosticsNode> nextHover;
+  private DiagnosticsNode hoverRenderObject;
+  private DiagnosticsNode screenshotRoot;
 
   public InspectorPanel(FlutterView flutterView,
                         @NotNull FlutterApp flutterApp,
@@ -141,7 +170,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
                         boolean legacyMode,
                         @NotNull EventStream<Boolean> shouldAutoHorizontalScroll,
                         @NotNull EventStream<Boolean> highlightNodesShownInBothTrees
-                        ) {
+  ) {
     this(flutterView, flutterApp, inspectorService, isApplicable, treeType, false, null, isSummaryTree, legacyMode,
          shouldAutoHorizontalScroll, highlightNodesShownInBothTrees);
   }
@@ -164,6 +193,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     this.inspectorService = inspectorService;
     this.treeGroups = new InspectorObjectGroupManager(inspectorService, "tree");
     this.selectionGroups = new InspectorObjectGroupManager(inspectorService, "selection");
+    this.screenshotGroups = new InspectorObjectGroupManager(inspectorService, "screenshot");
     this.isApplicable = isApplicable;
     this.detailsSubtree = detailsSubtree;
     this.isSummaryTree = isSummaryTree;
@@ -173,9 +203,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     this.defaultIcon = iconMaker.fromInfo("Default");
 
     refreshRateLimiter = new AsyncRateLimiter(REFRESH_FRAMES_PER_SECOND, this::refresh);
+    hoverRateLimiter = new AsyncRateLimiter(MOUSE_FRAMES_PER_SECOND, this::refreshHover);
 
     final String parentTreeDisplayName = (parentTree != null) ? parentTree.treeType.displayName : null;
-
     myRootsTree = new InspectorTree(
       new DefaultMutableTreeNode(null),
       treeType.displayName,
@@ -189,6 +219,36 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     myRootsTree.setHorizontalAutoScrollingEnabled(false);
     myRootsTree.setAutoscrolls(false);
     myRootsTree.setToggleClickCount(0);
+
+    MouseListener showInspectorListener = new MouseListener() {
+      @Override
+      public void mouseClicked(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mousePressed(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mouseReleased(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mouseEntered(MouseEvent e) {
+        DiagnosticsNode selection = getSelectedDiagnostic();
+        getFlutterApp().callBooleanExtension("ext.flutter.inspector.showSelection", true);
+      }
+
+      @Override
+      public void mouseExited(MouseEvent e) {
+        getFlutterApp().callBooleanExtension("ext.flutter.inspector.showSelection", false);
+      }
+    };
+    myRootsTree.addMouseListener(showInspectorListener);
+
 
     myRootsTree.addTreeExpansionListener(new MyTreeExpansionListener());
     InspectorTreeMouseListener mouseListener = new InspectorTreeMouseListener(this, myRootsTree);
@@ -254,12 +314,173 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       Disposer.register(this, treeSplitter::dispose);
       Disposer.register(this, scrollAnimator::dispose);
       treeSplitter.setFirstComponent(treeScrollPane);
+      treeSplitterDevice = new Splitter(false);
+      treeSplitterDevice.setProportion(0.3f);
+
+      if (treeType.equals(InspectorService.FlutterTreeType.widget)) {
+        imageComponent = new ImageComponent();
+        imageComponent.setAutoscrolls(true);
+        imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
+
+        imageComponent.addMouseListener(new MouseListener() {
+          @Override
+          public void mouseClicked(MouseEvent e) {
+            // XXX move to a helper... compute earlier.
+            final Point point = e.getPoint();
+            final double width = imageComponent.getWidth();
+            final double height = imageComponent.getHeight();
+            treeGroups.getCurrent().inspectAt(point.getX() / width, (double)point.getY() / height);
+          }
+
+          @Override
+          public void mousePressed(MouseEvent e) {
+
+          }
+
+          @Override
+          public void mouseReleased(MouseEvent e) {
+
+          }
+
+          @Override
+          public void mouseEntered(MouseEvent e) {
+          }
+
+          @Override
+          public void mouseExited(MouseEvent e) {
+            lastHoverPosition = null;
+          }
+        });
+        imageComponent.addMouseListener(showInspectorListener);
+
+        imageComponent.addMouseMotionListener(new MouseMotionListener() {
+
+          private Balloon b;
+
+          @Override
+          public void mouseDragged(MouseEvent e) {
+            lastHoverPosition = e.getPoint();
+            hoverRateLimiter.scheduleRequest();
+          }
+
+          @Override
+          public void mouseMoved(MouseEvent e) {
+            lastHoverPosition = e.getPoint();
+            hoverRateLimiter.scheduleRequest();
+          }
+        });
+        imageContainerPane = new ImageContainerPane(imageComponent);
+        imageContainerPane.add(new TextArea("Hello world!!!"));
+
+        JScrollPane imageScrollPane = ScrollPaneFactory.createScrollPane(imageContainerPane, true);
+        imageContainerPane.setScaleParent(imageScrollPane);
+
+        imageScrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        imageScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        UIUtil.invokeLaterIfNeeded(() -> {
+          final Project project = flutterApp.getProject();
+          if (project.isDisposed()) {
+            return;
+          }
+
+          mirrorToolWindow = (ToolWindowEx)ToolWindowManager
+            .getInstance(project).registerToolWindow(MIRRORWINDOW_ID, false, ToolWindowAnchor.BOTTOM, flutterApp.getProject(), true);
+
+          final Content content = ContentFactory.SERVICE.getInstance().createContent(imageScrollPane, "", false);
+          mirrorToolWindow.getContentManager().addContent(content);
+          mirrorToolWindow.setAnchor(ToolWindowAnchor.RIGHT, () -> {
+          });
+          mirrorToolWindow.setSplitMode(true, () -> {
+          });
+          mirrorToolWindow.setAutoHide(false);
+          mirrorToolWindow.setType(ToolWindowType.WINDOWED, () -> {
+            int desiredHeight = 300;
+            int height = mirrorToolWindow.getComponent().getHeight();
+            mirrorToolWindow.stretchHeight(desiredHeight - height);
+          });
+          mirrorToolWindow.getComponent().setMinimumSize(new Dimension(120, 200));
+          UISettings.getInstance().setWideScreenSupport(true);
+          UISettings.getInstance().fireUISettingsChanged();
+          /*
+          JLayeredPane balloonPane = new JLayeredPane();
+          JLabel l = new JLabel();
+          l.setText("HAHA");
+          l.setIcon(FlutterIcons.PhoneMirrorIntro);
+          mirrorToolWindow.setIcon(FlutterIcons.Phone);
+          mirrorToolWindow.setAutoHide(false);
+          balloonPane.setLayer(l, 1);*/
+
+          ToolWindowEx toolWindowEx = (ToolWindowEx)mirrorToolWindow;
+          // XXXX
+          //   toolWindowEx.setTitleActions(new AnalysisServerFeedbackAction());
+          // ArrayList<AnAction> gearActions = new ArrayList<>();
+          // toolWindowEx.setAdditionalGearActions(new DefaultActionGroup(gearActions));
+
+          /* XXXX
+          myPanel.setToolWindowUpdater(new ToolWindowUpdater() {
+            @Override
+            public void setIcon(@NotNull Icon icon) {
+              // myCurrentIcon = icon;
+              // XXX updateIcon();
+            }
+
+            @Override
+            public void setHeaderText(@NotNull String headerText) {
+              content.setDisplayName(headerText);
+            }
+          });
+          */
+
+          /* // XXX
+          if (PropertiesComponent.getInstance(project).getBoolean("flutter.tool.mirror.window.force.activate", true)) {
+            PropertiesComponent.getInstance(project).setValue("flutter.tool.mirror.window.force.activate", false, true);
+
+          }*/
+          mirrorToolWindow.activate(null, false);
+
+          Disposer.register(project, () -> {
+            if (mirrorToolWindow != null) {
+              mirrorToolWindow.getContentManager().removeAllContents(true);
+            }
+          });
+        });
+
+
+        PropertyChangeListener imageSizeChange = new PropertyChangeListener() {
+
+          @Override
+          public void propertyChange(PropertyChangeEvent evt) {
+            imageContainerPane.invalidate();
+          }
+        };
+      }
+
       add(treeSplitter);
     }
     else {
+      imageComponent = null;
+      imageContainerPane = null;
+      treeSplitterDevice = null;
       treeSplitter = null;
       myPropertiesPanel = null;
-      add(treeScrollPane);
+      if (parentTree != null) {
+        JLabel emptyLabel = new JLabel();
+        emptyLabel.setIcon(FlutterIcons.PhoneMirrorIntro);
+        emptyLabel.setText(null);
+        tutorialPanel = new JPanel();
+        tutorialPanel.setLayout(new GridBagLayout());
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.anchor = GridBagConstraints.SOUTH;
+        constraints.weighty = 1;
+
+        tutorialPanel.add(emptyLabel, constraints);
+        tutorialPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        add(tutorialPanel);
+      }
+      else {
+        add(treeScrollPane);
+      }
     }
 
     this.addComponentListener(new ComponentListener() {
@@ -276,6 +497,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       @Override
       public void componentShown(ComponentEvent e) {
         determineSplitterOrientation();
+        if (imageContainerPane != null) {
+          imageContainerPane.invalidate();
+        }
       }
 
       @Override
@@ -290,6 +514,136 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         onIsolateStopped();
       }
     }, true);
+  }
+
+  boolean firstImage = true;
+
+
+  private class ImageContainerPane extends JLayeredPane {
+    private final ImageComponent imageComponent;
+    private JScrollPane scaleParent;
+    private DiagnosticsNode hover;
+    private Balloon b;
+
+    public ImageContainerPane(ImageComponent imageComponent) {
+      this.imageComponent = imageComponent;
+      add(imageComponent);
+    }
+
+    public void setScaleParent(JScrollPane scaleParent) {
+      this.scaleParent = scaleParent;
+    }
+
+    private void centerComponents() {
+      Rectangle bounds = getBounds();
+      Point point = imageComponent.getLocation();
+      BufferedImage image = imageComponent.getDocument().getValue();
+      if (image != null) {
+
+        Rectangle scaleBounds = scaleParent.getBounds();
+        double width = image.getWidth();
+        double height = image.getHeight();
+        double scaleWidth = (scaleBounds.getWidth() - 4) / width;
+        double scaleHeight = (scaleBounds.getHeight() - 4) / height;
+        double scale = Math.min(scaleWidth, scaleHeight);
+
+        Dimension existing = imageComponent.getCanvasSize();
+        Dimension newDimension = new Dimension((int)Math.floor(width * scale), (int)Math.floor(height * scale));
+        if (!existing.equals(newDimension)) {
+          imageComponent.setCanvasSize(newDimension);
+          imageComponent.invalidate(); // XXX not needed.
+        }
+      }
+
+      point.x = (bounds.width - imageComponent.getWidth()) / 2;
+      point.y = (bounds.height - imageComponent.getHeight()) / 2;
+      bounds.getWidth();
+      imageComponent.setLocation(point);
+    }
+
+    public void invalidate() {
+      centerComponents();
+      super.invalidate();
+    }
+
+    public Dimension getPreferredSize() {
+      return imageComponent.getSize();
+    }
+
+    public void setHover(DiagnosticsNode hover) {
+      if (hover != this.hover) {
+        this.hover = hover;
+        if (b != null) {
+          b.setAnimationEnabled(false);
+          b.hide();
+        }
+        if (hover != null) {
+          b = JBPopupFactory.getInstance().createBalloonBuilder(new JLabel(hover.getDescription()))
+            .setFadeoutTime(0)
+            .setHideOnFrameResize(true)
+            .setContentInsets(JBUI.insets(15))
+            .createBalloon();
+          final Rectangle rect = getRelativeRect(hover);
+          if (rect != null) {
+            final Point location = rect.getLocation();
+            Balloon.Position position = Balloon.Position.above;
+            if (location.y < imageComponent.getSize().getHeight() / 4) {
+              position = Balloon.Position.below;
+              location.translate(0, rect.height);
+            }
+            location.translate(Math.min(rect.width / 2, 20), 0);
+            b.setAnimationEnabled(false);
+            b.show(new RelativePoint(imageComponent, location), position);
+          }
+        }
+        this.repaint();
+      }
+    }
+
+    double getScreenshotScale() {
+      double scale = (double)imageComponent.getCanvasSize().getWidth() / (double)imageComponent.getDocument().getValue().getWidth();
+      scale *= 2.0; // XXX hack to fix from device to physical pixels. XXX!!!
+      return scale;
+    }
+
+    Rectangle getRelativeRect(DiagnosticsNode target) {
+      final Rectangle box = target.getBoundingBox();
+      if (box == null || screenshotRoot == null) {
+        return null;
+      }
+      final Rectangle screenshotRect = screenshotRoot.getBoundingBox();
+      final Dimension canvasSize = imageComponent.getCanvasSize();
+      final double scale = canvasSize.getWidth() / screenshotRect.getWidth();
+      return new Rectangle((int)Math.round((box.getX() - screenshotRect.getX()) * scale),
+                           (int)Math.round((box.getY() - screenshotRect.getY()) * scale),
+                           (int)Math.round(box.getWidth() * scale), (int)Math.round(box.getHeight() * scale));
+    }
+
+    @Override
+    public void paint(Graphics g) {
+      super.paint(g);
+      if (hover != null && screenshotRoot != null) {
+
+        Rectangle box = getRelativeRect(hover);
+        if (box != null) {
+          double offset;
+          double scale = getScreenshotScale();
+          double x = box.getX() * scale + imageComponent.getLocation().getX() + 2;
+          double y = box.getY() * scale + imageComponent.getLocation().getY() + 2;
+          double width = box.getWidth() * scale;
+          double height = box.getHeight() * scale;
+          g.setColor(new Color(128, 128, 255, 64));// Lower alpha than on device (128)
+          g.fillRect((int)x, (int)y, (int)width, (int)height);
+          g.setColor(new Color(64, 64, 128, 128));
+          g.drawRect((int)x, (int)y, (int)width, (int)height);
+/*
+          String text = hover.getDescription();
+          g.getFontMetrics().getStringBounds()
+          g.drawString(, (int)x, (int)y - 20);
+          */
+        }
+      }
+    }
   }
 
   public boolean isHighlightNodesShownInBothTrees() {
@@ -388,6 +742,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     if (vertical != treeSplitter.getOrientation()) {
       treeSplitter.setOrientation(vertical);
     }
+    if (imageContainerPane != null) {
+      imageContainerPane.invalidate();
+    }
   }
 
   protected boolean hasDiagnosticsValue(InspectorInstanceRef ref) {
@@ -442,6 +799,42 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return ret;
   }
 
+  Point lastHoverPosition;
+
+  private CompletableFuture<?> refreshHover() {
+    if (!visibleToUser) {
+      // We will refresh again once we are visible.
+      // There is a risk a refresh got triggered before the view was visble.
+      return CompletableFuture.completedFuture(null);
+    }
+
+    if (lastHoverPosition == null) {
+      setHoverRenderObject(null);
+      return CompletableFuture.completedFuture(null);
+    }
+
+    final Point point = lastHoverPosition;
+    final double width = imageComponent.getWidth();
+    final double height = imageComponent.getHeight();
+
+    nextHover = screenshotGroups.getCurrent().hoverAt(point.getX() / width, (double)point.getY() / height);
+
+    screenshotGroups.getCurrent().safeWhenComplete(nextHover, (node, error) -> {
+      if (error != null) {
+        return;
+      }
+      setHoverRenderObject(node);
+    });
+    return nextHover;
+  }
+
+  private void setHoverRenderObject(DiagnosticsNode node) {
+    hoverRenderObject = node;
+    if (imageContainerPane != null) {
+      imageContainerPane.setHover(hoverRenderObject);
+    }
+  }
+
   private CompletableFuture<?> refresh() {
     if (!visibleToUser) {
       // We will refresh again once we are visible.
@@ -449,18 +842,83 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       return CompletableFuture.completedFuture(null);
     }
 
+    final long startTime = System.currentTimeMillis();
+    if (imageComponent != null) {
+      LOG.info("ZZZ StartTime= " + startTime);
+    }
+
+    ArrayList<CompletableFuture<?>> futures = new ArrayList<>();
+    if (imageComponent != null && mirrorToolWindow != null && mirrorToolWindow.isVisible()) {
+      screenshotGroups.cancelNext();
+      InspectorService.ObjectGroup screenshotGroup = screenshotGroups.getNext();
+      // XXX need to refresh mirrorToolWindow when it becomes visible.
+      final Dimension size = imageContainerPane.getSize();
+      if (size.width > 0 && size.height > 0) {
+        float scale = JBUI.pixScale(imageComponent);
+        final CompletableFuture<DiagnosticsNode> selectedRenderObjectFuture =
+          screenshotGroup.getSelection(null, InspectorService.FlutterTreeType.renderObject, false);
+        final CompletableFuture<?> screenshotDone =
+          screenshotGroup.getRenderObjectForScreenshot().thenComposeAsync((DiagnosticsNode screenshotRoot) -> {
+
+            CompletableFuture<BufferedImage> screenshotFuture = screenshotGroup
+              .getScreenshot(screenshotRoot.getValueRef(), Math.round((size.width - 4) * scale), Math.round((size.height - 4) * scale));
+
+            screenshotGroup.safeWhenComplete(CompletableFuture.allOf(screenshotFuture, selectedRenderObjectFuture), (ignored, error) -> {
+              final BufferedImage image = screenshotFuture.getNow(null);
+              final DiagnosticsNode selectedRenderObject = selectedRenderObjectFuture.getNow(null);
+              this.screenshotRoot = screenshotRoot;
+              long timeDelta = System.currentTimeMillis() - startTime;
+              LOG.info("Time for screenshot in ms= " + timeDelta);
+              if (image == null || error != null) {
+                LOG.info("Error computing screenshot!");
+                return;
+              }
+              setHoverRenderObject(selectedRenderObject);
+              imageComponent.getDocument().setValue(image);
+              imageComponent.invalidate();
+
+              imageComponent.repaint();
+              screenshotGroups.promoteNext();
+            });
+
+            return screenshotFuture;
+          });
+// XXX       futures.add(selectedRenderObjectFuture);
+// XXX        futures.add(screenshotDone);
+      }
+    }
+
     // TODO(jacobr): refresh the tree as well as just the properties.
     if (myPropertiesPanel != null) {
       myPropertiesPanel.refresh();
     }
+    futures.add(getPendingUpdateDone());
     if (myPropertiesPanel != null) {
-      return CompletableFuture.allOf(getPendingUpdateDone(), myPropertiesPanel.getPendingUpdateDone());
+      futures.add(myPropertiesPanel.getPendingUpdateDone());
     }
     else if (subtreePanel != null) {
-      return CompletableFuture.allOf(getPendingUpdateDone(), subtreePanel.getPendingUpdateDone());
+      futures.add(subtreePanel.getPendingUpdateDone());
+    }
+    final CompletableFuture[] futuresArray = new CompletableFuture[futures.size()];
+    futures.toArray(futuresArray);
+
+    CompletableFuture<Void> allComplete = CompletableFuture.allOf(futuresArray);
+    allComplete.whenComplete((a, b) -> {
+      long timeDelta = System.currentTimeMillis() - startTime;
+      if (imageComponent != null) {
+        LOG.info("Time for refresh in ms= " + timeDelta);
+        LOG.info("StartTime= " + startTime);
+      }
+    });
+    return allComplete;
+  }
+
+  private DiagnosticsNode getDetailsSelection() {
+    if (detailsSubtree == true || subtreePanel == null) {
+      return getSelectedDiagnostic();
     }
     else {
-      return getPendingUpdateDone();
+      return subtreePanel.getDetailsSelection();
     }
   }
 
@@ -471,6 +929,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     programaticSelectionChangeInProgress = true;
     treeGroups.clear(isolateStopped);
     selectionGroups.clear(isolateStopped);
+    screenshotGroups.clear(isolateStopped);
 
     currentShowNode = null;
     selectedNode = null;
@@ -478,6 +937,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
     selectedNode = null;
     subtreeRoot = null;
+    nextHover = null;
+    screenshotRoot = null;
 
     getTreeModel().setRoot(new DefaultMutableTreeNode());
     if (subtreePanel != null) {
@@ -503,7 +964,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
     if (!legacyMode) {
       // We can't efficiently refresh the full tree in legacy mode.
-      recomputeTreeRoot(null, null, false);
+      // XXX WHAT? this is not legacy mode.
+      recomputeTreeRoot(InspectorSelection.empty(), false, true);
     }
     if (myPropertiesPanel != null) {
       myPropertiesPanel.refresh();
@@ -545,7 +1007,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     if (flutterAppFrameReady) {
       // We need to start by quering the inspector service to find out the
       // current state of the UI.
-      updateSelectionFromService();
+      updateSelectionFromService(true);
     }
     else {
       AsyncUtils.whenCompleteUiThread(inspectorService.isWidgetTreeReady(), (Boolean ready, Throwable throwable) -> {
@@ -564,9 +1026,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return (DefaultMutableTreeNode)getTreeModel().getRoot();
   }
 
-  private void recomputeTreeRoot(DiagnosticsNode newSelection,
-                                 DiagnosticsNode detailsSelection,
-                                 boolean setSubtreeRoot) {
+  private void recomputeTreeRoot(InspectorSelection selection,
+                                 boolean setSubtreeRoot,
+                                 boolean allowChangeSourceLocation) {
     treeGroups.cancelNext();
     treeGroups.getNext().safeWhenComplete(detailsSubtree
                                           ? treeGroups.getNext().getDetailsSubtree(subtreeRoot)
@@ -596,7 +1058,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       else {
         getTreeModel().setRoot(null);
       }
-      refreshSelection(newSelection, detailsSelection, setSubtreeRoot);
+      refreshSelection(selection, setSubtreeRoot, allowChangeSourceLocation);
     });
   }
 
@@ -620,7 +1082,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     this.subtreeRoot = subtreeRoot;
     myRootsTree.setHighlightedRoot(getSubtreeRootNode());
     if (subtreePanel != null) {
-      subtreePanel.setSubtreeRoot(subtreeRoot, subtreeSelection);
+      subtreePanel.setSubtreeRoot(subtreeRoot, subtreeSelection, false);
     }
   }
 
@@ -628,14 +1090,14 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return subtreeRoot != null ? subtreeRoot.getValueRef() : null;
   }
 
-  public void setSubtreeRoot(DiagnosticsNode node, DiagnosticsNode selection) {
+  public void setSubtreeRoot(DiagnosticsNode node, DiagnosticsNode selection, boolean allowChangeSourceLocation) {
     assert (detailsSubtree);
     if (selection == null) {
       selection = node;
     }
     if (node != null && node.equals(subtreeRoot)) {
       //  Select the new node in the existing subtree.
-      applyNewSelection(selection, null, false);
+      applyNewSelection(new InspectorSelection(selection, null), false, allowChangeSourceLocation);
       return;
     }
     subtreeRoot = node;
@@ -645,9 +1107,15 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       return;
     }
 
+    if (tutorialPanel != null) {
+      remove(tutorialPanel);
+      add(treeScrollPane);
+      tutorialPanel = null;
+    }
+
     // Clear now to eliminate frame of highlighted nodes flicker.
     clearValueToTreeNodeMapping();
-    recomputeTreeRoot(selection, null, false);
+    recomputeTreeRoot(InspectorSelection.empty(), false, allowChangeSourceLocation);
   }
 
   DefaultMutableTreeNode getSubtreeRootNode() {
@@ -657,17 +1125,18 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return valueToTreeNode.get(subtreeRoot.getValueRef());
   }
 
-  private void refreshSelection(DiagnosticsNode newSelection, DiagnosticsNode detailsSelection, boolean setSubtreeRoot) {
+  private void refreshSelection(InspectorSelection selection, boolean setSubtreeRoot, boolean allowChangeSourceLocation) {
+    DiagnosticsNode newSelection = selection.getSelection();
     if (newSelection == null) {
       newSelection = getSelectedDiagnostic();
     }
     setSelectedNode(findMatchingTreeNode(newSelection));
-    syncSelectionHelper(setSubtreeRoot, detailsSelection);
+    syncSelectionHelper(setSubtreeRoot, selection.getDetailsSelection(), allowChangeSourceLocation);
 
     if (subtreePanel != null) {
       if ((subtreeRoot != null && getSubtreeRootNode() == null)) {
         subtreeRoot = newSelection;
-        subtreePanel.setSubtreeRoot(newSelection, detailsSelection);
+        subtreePanel.setSubtreeRoot(newSelection, selection.getDetailsSelection(), false);
       }
     }
     if (!legacyMode) {
@@ -826,7 +1295,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return a.getDartDiagnosticRef().equals(b.getDartDiagnosticRef());
   }
 
-  public void onInspectorSelectionChanged() {
+  public void onInspectorSelectionChanged(boolean allowChangeSourceLocation) {
     if (!visibleToUser) {
       // Don't do anything. We will update the view once it is visible again.
       return;
@@ -835,12 +1304,13 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       // Wait for the master to update.
       return;
     }
-    updateSelectionFromService();
+    updateSelectionFromService(allowChangeSourceLocation);
   }
 
-  public void updateSelectionFromService() {
+  public void updateSelectionFromService(boolean allowChangeSourceLocation) {
     treeLoadStarted = true;
     selectionGroups.cancelNext();
+    screenshotGroups.cancelNext();
 
     final CompletableFuture<DiagnosticsNode> pendingSelectionFuture =
       selectionGroups.getNext().getSelection(getSelectedDiagnostic(), treeType, isSummaryTree);
@@ -869,14 +1339,14 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         }
         subtreeRoot = newSelection;
 
-        applyNewSelection(newSelection, detailsSelection, true);
+        applyNewSelection(new InspectorSelection(newSelection, detailsSelection), true, allowChangeSourceLocation);
       }
       else {
         // Legacy case. TODO(jacobr): deprecate and remove this code.
         // This case only exists for the RenderObject tree which we haven't updated yet to use the new UI style.
         // TODO(jacobr): delete it.
         if (newSelection == null) {
-          recomputeTreeRoot(null, null, false);
+          recomputeTreeRoot(InspectorSelection.empty(), false, allowChangeSourceLocation);
           return;
         }
         // TODO(jacobr): switch to using current and next groups in this case
@@ -942,18 +1412,18 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     });
   }
 
-  protected void applyNewSelection(DiagnosticsNode newSelection,
-                                   DiagnosticsNode detailsSelection,
-                                   boolean setSubtreeRoot) {
-    final DefaultMutableTreeNode nodeInTree = findMatchingTreeNode(newSelection);
+  protected void applyNewSelection(InspectorSelection selection,
+                                   boolean setSubtreeRoot,
+                                   boolean allowChangeSourceLocation) {
+    final DefaultMutableTreeNode nodeInTree = findMatchingTreeNode(selection.getSelection());
 
     if (nodeInTree == null) {
       // The tree has probably changed since we last updated. Do a full refresh
       // so that the tree includes the new node we care about.
-      recomputeTreeRoot(newSelection, detailsSelection, setSubtreeRoot);
+      recomputeTreeRoot(selection, setSubtreeRoot, allowChangeSourceLocation);
     }
 
-    refreshSelection(newSelection, detailsSelection, setSubtreeRoot);
+    refreshSelection(selection, setSubtreeRoot, allowChangeSourceLocation);
   }
 
   private DiagnosticsNode getSelectedDiagnostic() {
@@ -1032,6 +1502,21 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         getTreeModel().nodeChanged(selectedNode.getParent());
       }
     }
+    final DiagnosticsNode diagnostic = TreeUtils.maybeGetDiagnostic(newSelection);
+    if (diagnostic != null) {
+      if (!diagnostic.isProperty() && treeType == InspectorService.FlutterTreeType.widget) {
+        diagnostic.safeWhenComplete(diagnostic.getInspectorService().toDartVmServiceValue(
+          diagnostic.getValueRef()), (value, throwable) -> {
+          if (throwable != null) {
+            // Log but not fatal. XXX
+            return;
+          }
+          // TODO(jacobr): add back.
+          // getInspectorService().getDebugProcess().getDebuggerScope().addElement(value);
+        });
+      }
+    }
+
     selectedNode = newSelection;
     animateTo(selectedNode);
 
@@ -1065,7 +1550,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       // Don't reroot if the selected value is already visible in the details tree.
       final boolean maybeReroot = isSummaryTree && subtreePanel != null && selectedDiagnostic != null &&
                                   !subtreePanel.hasDiagnosticsValue(selectedDiagnostic.getValueRef());
-      syncSelectionHelper(maybeReroot, null);
+      syncSelectionHelper(maybeReroot, null, true);
       if (maybeReroot == false) {
         if (isSummaryTree && subtreePanel != null) {
           subtreePanel.selectAndShowNode(selectedDiagnostic);
@@ -1091,12 +1576,12 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return null;
   }
 
-  private void syncSelectionHelper(boolean maybeRerootSubtree, DiagnosticsNode detailsSelection) {
+  private void syncSelectionHelper(boolean maybeRerootSubtree, DiagnosticsNode detailsSelection, boolean allowChangeSourceLocation) {
     if (!detailsSubtree && selectedNode != null) {
       getTreeModel().nodeChanged(selectedNode.getParent());
     }
     final DiagnosticsNode diagnostic = getSelectedDiagnostic();
-    if (diagnostic != null) {
+    if (diagnostic != null && allowChangeSourceLocation) {
       if (isCreatedByLocalProject(diagnostic)) {
         XSourcePosition position = diagnostic.getCreationLocation().getXSourcePosition();
         if (position != null) {
@@ -1127,7 +1612,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     if (maybeRerootSubtree) {
       showDetailSubtrees(diagnostic, detailsSelection);
     }
-    else if (diagnostic != null) {
+
+    if (diagnostic != null) {
       // We can't rely on the details tree to update the selection on the server in this case.
       DiagnosticsNode selection = detailsSelection != null ? detailsSelection : diagnostic;
       selection.getInspectorService().setSelection(selection.getValueRef(), true);
@@ -1159,13 +1645,24 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   private ActionGroup createTreePopupActions() {
     final DefaultActionGroup group = new DefaultActionGroup();
     final ActionManager actionManager = ActionManager.getInstance();
+    // TODO(jacobr): hide JUMP_TO_SOURCE when it is unavailable.
     group.add(actionManager.getAction(InspectorActions.JUMP_TO_SOURCE));
     group.add(actionManager.getAction(InspectorActions.JUMP_TO_TYPE_SOURCE));
+
+    group.add(actionManager.getAction(InspectorActions.INSPECT_WITH_DEBUGGER));
+    group.add(actionManager.getAction(InspectorActions.SCREENSHOT));
+
     return group;
   }
 
   @Override
   public void dispose() {
+    if (mirrorToolWindow != null) {
+      ToolWindowManager
+        .getInstance(getFlutterApp().getProject()).unregisterToolWindow(MIRRORWINDOW_ID);
+      mirrorToolWindow = null;
+    }
+
     flutterIsolateSubscription.dispose();
     // TODO(jacobr): actually implement.
     final InspectorService service = getInspectorService();
@@ -1562,5 +2059,27 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     @Override
     public void treeCollapsed(TreeExpansionEvent event) {
     }
+  }
+
+  public static class InspectorSelection {
+    public InspectorSelection(DiagnosticsNode selection, DiagnosticsNode detailsSelection) {
+      this.selection = selection;
+      this.detailsSelection = detailsSelection;
+    }
+
+    public static InspectorSelection empty() {
+      return new InspectorSelection(null, null);
+    }
+
+    public DiagnosticsNode getSelection() {
+      return selection;
+    }
+
+    public DiagnosticsNode getDetailsSelection() {
+      return detailsSelection;
+    }
+
+    private final DiagnosticsNode selection;
+    private final DiagnosticsNode detailsSelection;
   }
 }
