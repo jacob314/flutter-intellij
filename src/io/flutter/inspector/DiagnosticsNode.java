@@ -14,7 +14,7 @@ import com.intellij.openapi.project.ProjectUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.xdebugger.XSourcePosition;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.CustomIconMaker;
 import io.flutter.utils.JsonUtils;
@@ -669,7 +669,7 @@ public class DiagnosticsNode {
     final DiagnosticsNode parent = getParent();
     if (parent != null) {
       return inspectorService.toDartVmServiceValueForSourceLocation(parent.getValueRef())
-        .thenComposeAsync((DartVmServiceValue vmValue) -> {
+        .thenComposeAsync((FlutterVmServiceValue vmValue) -> {
           if (vmValue == null) {
             return CompletableFuture.completedFuture(null);
           }

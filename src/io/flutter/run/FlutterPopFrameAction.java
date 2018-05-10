@@ -15,7 +15,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.xdebugger.XDebugSession;
 import com.intellij.xdebugger.XDebuggerManager;
 import com.intellij.xdebugger.frame.XStackFrame;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceStackFrame;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceStackFrame;
 import io.flutter.FlutterBundle;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -30,14 +30,14 @@ public class FlutterPopFrameAction extends AnAction implements DumbAware {
   }
 
   public void actionPerformed(@NotNull AnActionEvent e) {
-    final DartVmServiceStackFrame frame = getStackFrame(e);
+    final FlutterVmServiceStackFrame frame = getStackFrame(e);
     if (frame != null) {
       frame.dropFrame();
     }
   }
 
   public void update(@NotNull AnActionEvent e) {
-    final DartVmServiceStackFrame frame = getStackFrame(e);
+    final FlutterVmServiceStackFrame frame = getStackFrame(e);
     final boolean enabled = frame != null && frame.canDrop();
 
     if (ActionPlaces.isMainMenuOrActionSearch(e.getPlace()) || ActionPlaces.DEBUGGER_TOOLBAR.equals(e.getPlace())) {
@@ -49,7 +49,7 @@ public class FlutterPopFrameAction extends AnAction implements DumbAware {
   }
 
   @Nullable
-  private static DartVmServiceStackFrame getStackFrame(@NotNull final AnActionEvent e) {
+  private static FlutterVmServiceStackFrame getStackFrame(@NotNull final AnActionEvent e) {
     final Project project = e.getProject();
     if (project == null) return null;
 
@@ -61,8 +61,8 @@ public class FlutterPopFrameAction extends AnAction implements DumbAware {
 
     if (session != null) {
       final XStackFrame frame = session.getCurrentStackFrame();
-      if (frame instanceof DartVmServiceStackFrame) {
-        return ((DartVmServiceStackFrame)frame);
+      if (frame instanceof FlutterVmServiceStackFrame) {
+        return ((FlutterVmServiceStackFrame)frame);
       }
     }
 

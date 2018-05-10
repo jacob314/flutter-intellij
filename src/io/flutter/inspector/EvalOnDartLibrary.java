@@ -10,21 +10,17 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.util.Alarm;
 import com.intellij.util.Producer;
-import com.intellij.util.ReflectionUtil;
 import com.intellij.xdebugger.XSourcePosition;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.DartVmServiceDebugProcess;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.FlutterVmServiceDebugProcess;
 import io.flutter.perf.PerfService;
 import io.flutter.utils.StreamSubscription;
 import org.dartlang.vm.service.VmService;
-import org.dartlang.vm.service.consumer.Consumer;
 import org.dartlang.vm.service.consumer.EvaluateConsumer;
 import org.dartlang.vm.service.consumer.GetIsolateConsumer;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -200,7 +196,7 @@ public class EvalOnDartLibrary implements Disposable {
   }
 
   @NotNull
-  public CompletableFuture<XSourcePosition> getSourcePosition(DartVmServiceDebugProcess debugProcess,
+  public CompletableFuture<XSourcePosition> getSourcePosition(FlutterVmServiceDebugProcess debugProcess,
                                                               ScriptRef script,
                                                               int tokenPos,
                                                               InspectorService.ObjectGroup isAlive) {

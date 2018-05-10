@@ -11,7 +11,7 @@ import com.intellij.ui.AppUIUtil;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.frame.XNavigatable;
 import com.intellij.xdebugger.frame.XValue;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 import io.flutter.FlutterInitializer;
 import io.flutter.utils.AsyncUtils;
 import org.jetbrains.annotations.NotNull;
@@ -54,11 +54,11 @@ public abstract class JumpToSourceActionBase extends InspectorTreeActionBase {
       navigatable.setSourcePosition(sourcePosition);
       return;
     }
-    // We have to get a DartVmServiceValue to compute the source position.
+    // We have to get a FlutterVmServiceValue to compute the source position.
     final InspectorService.ObjectGroup inspectorService = diagnosticsNode.getInspectorService();
-    final CompletableFuture<DartVmServiceValue> valueFuture =
+    final CompletableFuture<FlutterVmServiceValue> valueFuture =
       inspectorService.toDartVmServiceValueForSourceLocation(diagnosticsNode.getValueRef());
-    AsyncUtils.whenCompleteUiThread(valueFuture, (DartVmServiceValue value, Throwable throwable) -> {
+    AsyncUtils.whenCompleteUiThread(valueFuture, (FlutterVmServiceValue value, Throwable throwable) -> {
       if (throwable != null) {
         return;
       }

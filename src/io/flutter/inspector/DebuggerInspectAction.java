@@ -7,16 +7,10 @@ package io.flutter.inspector;
 
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.project.Project;
-import com.intellij.ui.AppUIUtil;
 import com.intellij.xdebugger.XDebuggerManager;
-import com.intellij.xdebugger.XSourcePosition;
-import com.intellij.xdebugger.frame.XNavigatable;
-import com.intellij.xdebugger.frame.XValue;
-import com.intellij.xdebugger.impl.ui.tree.XDebuggerTree;
 import com.intellij.xdebugger.impl.ui.tree.XInspectDialog;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 import io.flutter.FlutterInitializer;
-import io.flutter.utils.AsyncUtils;
 
 import javax.swing.tree.DefaultMutableTreeNode;
 import java.util.concurrent.CompletableFuture;
@@ -55,7 +49,7 @@ public class DebuggerInspectAction extends InspectorTreeActionBase {
     });
   }
 
-  CompletableFuture<DartVmServiceValue> getVmServiceValue(DiagnosticsNode node) {
+  CompletableFuture<FlutterVmServiceValue> getVmServiceValue(DiagnosticsNode node) {
     // We use this instead of just toDartVmServiceValue as showing an Element
     // instead of a Widget is also confusing for users here.
     return node.getInspectorService().toDartVmServiceValueForSourceLocation(node.getValueRef());

@@ -1,9 +1,4 @@
-/*
- * Copyright 2018 The Chromium Authors. All rights reserved.
- * Use of this source code is governed by a BSD-style license that can be
- * found in the LICENSE file.
- */
-package io.flutter.run;
+package com.jetbrains.lang.dart.ide.runner.server.vmService.frame;
 
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.project.Project;
@@ -15,32 +10,24 @@ import com.intellij.psi.PsiFile;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.evaluation.ExpressionInfo;
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.FlutterVmServiceDebugProcess;
 import com.jetbrains.lang.dart.psi.*;
-import io.flutter.inspector.EvalOnDartLibrary;
-import org.dartlang.vm.service.element.*;
+import org.dartlang.vm.service.element.Frame;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class FlutterVmServiceEvaluator extends XDebuggerEvaluator {
   private static final Pattern ERROR_PATTERN = Pattern.compile("Error:.* line \\d+ pos \\d+: (.+)");
 
-  @NotNull private final FlutterDebugProcess myDebugProcess;
+  @NotNull private final FlutterVmServiceDebugProcess myDebugProcess;
   @NotNull private final String myIsolateId;
-  @Nullable private final Frame myFrame;
+  @NotNull private final Frame myFrame;
 
-  public FlutterVmServiceEvaluator(@NotNull final FlutterDebugProcess debugProcess) {
-    myDebugProcess = debugProcess;
-    myIsolateId = debugProcess.getCurrentIsolateId();
-    myFrame = null;
-  }
-
-  public FlutterVmServiceEvaluator(@NotNull final FlutterDebugProcess debugProcess,
+  public FlutterVmServiceEvaluator(@NotNull final FlutterVmServiceDebugProcess debugProcess,
                                    @NotNull final String isolateId,
                                    @NotNull final Frame vmFrame) {
     myDebugProcess = debugProcess;
@@ -132,26 +119,7 @@ public class FlutterVmServiceEvaluator extends XDebuggerEvaluator {
   public void evaluate(@NotNull final String expression,
                        @NotNull final XEvaluationCallback callback,
                        @Nullable final XSourcePosition expressionPosition) {
-    if (myFrame != null) {
-      //  TODO(jacobr): inject scope variables even if on a frame.
-      // XXXX
-      myDebugProcess.getVmServiceWrapper().evaluateInFrame(myIsolateId, myFrame, expression, callback);
-    }
-    else if (myDebugProcess.getDartLibraryForEval() != null) {
-      final String isolateId = myIsolateId;
-      final EvalOnDartLibrary library = myDebugProcess.getDartLibraryForEval();
-      CompletableFuture<InstanceRef> future =
-        library.eval(expression, myDebugProcess.getDebuggerScope(isolateId).toMap(), null);
-      future.whenCompleteAsync((instanceRef, throwable) -> {
-        if (throwable != null) {
-          // XXX wrong.
-          callback.errorOccurred(
-            com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceEvaluator.getPresentableError(throwable.toString()));
-          return;
-        }
-        callback.evaluated(new FlutterVmServiceValue(myDebugProcess, isolateId, "result", instanceRef, null, null, false));
-      });
-    }
+    myDebugProcess.getVmServiceWrapper().evaluateInFrame(myIsolateId, myFrame, expression, callback);
   }
 
   @Nullable

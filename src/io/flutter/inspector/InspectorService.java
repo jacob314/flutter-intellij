@@ -13,7 +13,7 @@ import com.intellij.openapi.util.SystemInfo;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.evaluation.XDebuggerEditorsProvider;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.VmServiceConsumers;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.FlutterDebugProcess;
 import io.flutter.run.daemon.FlutterApp;
@@ -615,15 +615,15 @@ public class InspectorService implements Disposable {
      * Converts an inspector ref to value suitable for use by generic intellij
      * debugging tools.
      * <p>
-     * Warning: DartVmServiceValue references do not make any lifetime guarantees
+     * Warning: FlutterVmServiceValue references do not make any lifetime guarantees
      * so code keeping them around for a long period of time must be prepared to
      * handle reference expiration gracefully.
      */
-    public CompletableFuture<DartVmServiceValue> toDartVmServiceValue(InspectorInstanceRef inspectorInstanceRef) {
+    public CompletableFuture<FlutterVmServiceValue> toDartVmServiceValue(InspectorInstanceRef inspectorInstanceRef) {
       return invokeServiceMethodObservatory("toObject", inspectorInstanceRef).thenApplyAsync(
         (InstanceRef instanceRef) -> nullValueIfDisposed(() -> {
           //noinspection CodeBlock2Expr
-          return new DartVmServiceValue(debugProcess, inspectorLibrary.getIsolateId(), "inspectedObject", instanceRef, null, null, false);
+          return new FlutterVmServiceValue(debugProcess, inspectorLibrary.getIsolateId(), "inspectedObject", instanceRef, null, null, false);
         }));
     }
 
@@ -631,15 +631,15 @@ public class InspectorService implements Disposable {
      * Converts an inspector ref to value suitable for use by generic intellij
      * debugging tools.
      * <p>
-     * Warning: DartVmServiceValue references do not make any lifetime guarantees
+     * Warning: FlutterVmServiceValue references do not make any lifetime guarantees
      * so code keeping them around for a long period of time must be prepared to
      * handle reference expiration gracefully.
      */
-    public CompletableFuture<DartVmServiceValue> toDartVmServiceValueForSourceLocation(InspectorInstanceRef inspectorInstanceRef) {
+    public CompletableFuture<FlutterVmServiceValue> toDartVmServiceValueForSourceLocation(InspectorInstanceRef inspectorInstanceRef) {
       return invokeServiceMethodObservatory("toObjectForSourceLocation", inspectorInstanceRef).thenApplyAsync(
         (InstanceRef instanceRef) -> nullValueIfDisposed(() -> {
           //noinspection CodeBlock2Expr
-          return new DartVmServiceValue(debugProcess, inspectorLibrary.getIsolateId(), "inspectedObject", instanceRef, null, null, false);
+          return new FlutterVmServiceValue(debugProcess, inspectorLibrary.getIsolateId(), "inspectedObject", instanceRef, null, null, false);
         }));
     }
 

@@ -24,8 +24,8 @@ import com.intellij.xdebugger.frame.XStackFrame;
 import com.intellij.xdebugger.frame.XSuspendContext;
 import com.jetbrains.lang.dart.ide.runner.ObservatoryConnector;
 import com.jetbrains.lang.dart.ide.runner.base.DartDebuggerEditorsProvider;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceStackFrame;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceSuspendContext;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceStackFrame;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceSuspendContext;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import gnu.trove.THashSet;
 import io.flutter.FlutterBundle;
@@ -53,14 +53,14 @@ import java.util.*;
  *
  * <p>Doesn't do remote debugging. (The Flutter plugin doesn't need it.)</p>
  */
-public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
+public class DartVmServiceDebugProcessZ extends FlutterVmServiceDebugProcess {
   private static final Logger LOG = Logger.getInstance(DartVmServiceDebugProcessZ.class);
 
   private boolean myVmConnected = false;
 
   @NotNull private final XBreakpointHandler[] myBreakpointHandlers;
   private final IsolatesInfo myIsolatesInfo;
-  private VmServiceWrapper myVmServiceWrapper;
+  private FlutterVmServiceWrapper myVmServiceWrapper;
   private VmOpenSourceLocationListener myVmOpenSourceLocationListener;
 
   @NotNull private final Set<String> mySuspendedIsolateIds = Collections.synchronizedSet(new THashSet<>());
@@ -90,7 +90,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
     myConnector = connector;
 
     myIsolatesInfo = new IsolatesInfo();
-    final DartVmServiceBreakpointHandler breakpointHandler = new DartVmServiceBreakpointHandler(this);
+    final FlutterVmServiceBreakpointHandler breakpointHandler = new FlutterVmServiceBreakpointHandler(this);
     myBreakpointHandlers = new XBreakpointHandler[]{breakpointHandler};
 
     setLogger();
@@ -117,7 +117,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
       public void stackFrameChanged() {
         final XStackFrame stackFrame = getSession().getCurrentStackFrame();
         myLatestCurrentIsolateId =
-          stackFrame instanceof DartVmServiceStackFrame ? ((DartVmServiceStackFrame)stackFrame).getIsolateId() : null;
+          stackFrame instanceof FlutterVmServiceStackFrame ? ((FlutterVmServiceStackFrame)stackFrame).getIsolateId() : null;
       }
     });
 
@@ -131,7 +131,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
     return remoteDebug;
   }
 
-  public VmServiceWrapper getVmServiceWrapper() {
+  public FlutterVmServiceWrapper getVmServiceWrapper() {
     return myVmServiceWrapper;
   }
 
@@ -252,12 +252,12 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
 
   private void onConnectSucceeded(VmService vmService,
                                   VmOpenSourceLocationListener vmOpenSourceLocationListener) {
-    final DartVmServiceListener vmServiceListener =
-      new DartVmServiceListener(this, (DartVmServiceBreakpointHandler)myBreakpointHandlers[0]);
-    final DartVmServiceBreakpointHandler breakpointHandler = (DartVmServiceBreakpointHandler)myBreakpointHandlers[0];
+    final FlutterVmServiceListener vmServiceListener =
+      new FlutterVmServiceListener(this, (FlutterVmServiceBreakpointHandler)myBreakpointHandlers[0]);
+    final FlutterVmServiceBreakpointHandler breakpointHandler = (FlutterVmServiceBreakpointHandler)myBreakpointHandlers[0];
 
     myVmOpenSourceLocationListener = vmOpenSourceLocationListener;
-    myVmServiceWrapper = new VmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, breakpointHandler);
+    myVmServiceWrapper = new FlutterVmServiceWrapper(this, vmService, vmServiceListener, myIsolatesInfo, breakpointHandler);
 
     final ScriptProvider provider =
       (isolateId, scriptId) -> myVmServiceWrapper.getScriptSync(isolateId, scriptId);
@@ -277,7 +277,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
       // debug mode.
       // The ideal fix would by to fix VMServiceWrapper so that it checks
       // for already running isolates like we do here or to refactor where we
-      // create our VmServiceWrapper so we can listen for isolate creation soon
+      // create our FlutterVmServiceWrapper so we can listen for isolate creation soon
       // enough that we never miss an isolate creation message.
       vmService.getVM(new VMConsumer() {
         @Override
@@ -439,7 +439,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
   @Override
   public void startStepOver(@Nullable XSuspendContext context) {
     if (myLatestCurrentIsolateId != null && mySuspendedIsolateIds.contains(myLatestCurrentIsolateId)) {
-      final DartVmServiceSuspendContext suspendContext = (DartVmServiceSuspendContext)context;
+      final FlutterVmServiceSuspendContext suspendContext = (FlutterVmServiceSuspendContext)context;
       final StepOption stepOption = suspendContext != null && suspendContext.getAtAsyncSuspension() ? StepOption.OverAsyncSuspension
                                                                                                     : StepOption.Over;
       myVmServiceWrapper.resumeIsolate(myLatestCurrentIsolateId, stepOption);
@@ -461,7 +461,7 @@ public class DartVmServiceDebugProcessZ extends DartVmServiceDebugProcess {
   }
 
   @Override
-  public void dropFrame(DartVmServiceStackFrame frame) {
+  public void dropFrame(FlutterVmServiceStackFrame frame) {
     myVmServiceWrapper.dropFrame(frame.getIsolateId(), frame.getFrameIndex() + 1);
   }
 

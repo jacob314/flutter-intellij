@@ -19,8 +19,8 @@ import com.intellij.xdebugger.XDebugSession;
 import com.intellij.xdebugger.evaluation.XDebuggerEvaluator;
 import com.intellij.xdebugger.frame.XStackFrame;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.DartVmServiceDebugProcessZ;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceStackFrame;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceStackFrame;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 import com.jetbrains.lang.dart.util.DartUrlResolver;
 import io.flutter.actions.ReloadFlutterApp;
 import io.flutter.actions.RestartFlutterApp;
@@ -88,13 +88,13 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcessZ implements D
     private final String prefix;
 
     private int MAX_VALUES = 3;
-    final ArrayList<DartVmServiceValue> values = new ArrayList<>();
+    final ArrayList<FlutterVmServiceValue> values = new ArrayList<>();
 
     DebuggerScopeCache(String prefix) {
       this.prefix = prefix;
     }
 
-    public void add(DartVmServiceValue value) {
+    public void add(FlutterVmServiceValue value) {
       if (values.size() >= MAX_VALUES) {
         values.remove(values.size() - 1);
       }
@@ -105,7 +105,7 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcessZ implements D
       for (int i = 0; i < values.size(); ++i) {
         // TODO(jacobr): due to Observatory lifetime issues, this value may
         // have expired so we may need to recompute form a backing store.
-        final DartVmServiceValue value = values.get(i);
+        final FlutterVmServiceValue value = values.get(i);
 
         map.put(prefix + i, value.getInstanceRef().getId());
       }
@@ -133,15 +133,15 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcessZ implements D
       renderObjects.clear();
     }
 
-    public void addWidget(DartVmServiceValue widget) {
+    public void addWidget(FlutterVmServiceValue widget) {
       widgets.add(widget);
     }
 
-    public void addElement(DartVmServiceValue element) {
+    public void addElement(FlutterVmServiceValue element) {
       elements.add(element);
     }
 
-    public void addRenderObject(DartVmServiceValue renderObject) {
+    public void addRenderObject(FlutterVmServiceValue renderObject) {
       renderObjects.add(renderObject);
     }
 
@@ -172,8 +172,8 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcessZ implements D
 
   public ConsoleDebuggerScope getDebuggerScope() {
     final XStackFrame frame = getSession().getCurrentStackFrame();
-    if (frame instanceof DartVmServiceStackFrame) {
-      final DartVmServiceStackFrame dartStackFrame = (DartVmServiceStackFrame)frame;
+    if (frame instanceof FlutterVmServiceStackFrame) {
+      final FlutterVmServiceStackFrame dartStackFrame = (FlutterVmServiceStackFrame)frame;
       setCurrentIsolateId(dartStackFrame.getIsolateId());
     }
     return currentIsolateId != null ? debuggerScopes.get(currentIsolateId) : null;

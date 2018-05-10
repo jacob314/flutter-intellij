@@ -5,7 +5,7 @@
  */
 package io.flutter.inspector;
 
-import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.DartVmServiceValue;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.frame.FlutterVmServiceValue;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -15,7 +15,7 @@ public class DebuggerInspectElementAction extends DebuggerInspectAction {
   }
 
   @Override
-  CompletableFuture<DartVmServiceValue> getVmServiceValue(DiagnosticsNode node) {
+  CompletableFuture<FlutterVmServiceValue> getVmServiceValue(DiagnosticsNode node) {
     return node.getInspectorService().toDartVmServiceValue(node.getValueRef());
   }
 }
