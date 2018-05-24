@@ -44,6 +44,7 @@ import com.jetbrains.lang.dart.util.DartUrlResolver;
 import gnu.trove.THashMap;
 import gnu.trove.THashSet;
 import gnu.trove.TIntObjectHashMap;
+import io.flutter.inspector.InspectorService;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.element.*;
 import org.dartlang.vm.service.logging.Logging;
@@ -84,6 +85,8 @@ public class FlutterVmServiceDebugProcess extends XDebugProcess {
   @NotNull private final OpenDartObservatoryUrlAction myOpenObservatoryAction =
     new OpenDartObservatoryUrlAction(null, () -> myVmConnected && !getSession().isStopped());
 
+  // InspectorService providing enhanced functionality for debugging Flutter widgets.
+  private @Nullable InspectorService myInspectorService;
 
   public FlutterVmServiceDebugProcess(@NotNull final XDebugSession session,
                                       @NotNull final String debuggingHost,
@@ -154,6 +157,14 @@ public class FlutterVmServiceDebugProcess extends XDebugProcess {
     else {
       LOG.assertTrue(myExecutionResult != null && myDASExecutionContextId != null, myDASExecutionContextId + myExecutionResult);
     }
+  }
+
+  public void setInspectorService(InspectorService inspectorService) {
+    myInspectorService = inspectorService;
+  }
+
+  public InspectorService getInspectorService() {
+    return myInspectorService;
   }
 
   public FlutterVmServiceWrapper getVmServiceWrapper() {

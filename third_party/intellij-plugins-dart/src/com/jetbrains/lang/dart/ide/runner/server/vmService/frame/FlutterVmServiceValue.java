@@ -5,23 +5,24 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.util.Ref;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.ui.LayeredIcon;
+import com.intellij.xdebugger.XDebuggerUtil;
+import com.intellij.xdebugger.XExpression;
 import com.intellij.xdebugger.XSourcePosition;
+import com.intellij.xdebugger.evaluation.EvaluationMode;
 import com.intellij.xdebugger.frame.*;
 import com.intellij.xdebugger.frame.presentation.XKeywordValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XNumericValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XStringValuePresentation;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.FlutterVmServiceDebugProcess;
 import com.jetbrains.lang.dart.ide.runner.server.vmService.VmServiceConsumers;
+import io.flutter.inspector.InspectorService;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.concurrency.Promise;
 
 import javax.swing.*;
-
-// TODO: implement some combination of XValue.getEvaluationExpression() /
-// XValue.calculateEvaluationExpression() in order to support evaluate expression in variable values.
-// See https://youtrack.jetbrains.com/issue/WEB-17629.
 
 public class FlutterVmServiceValue extends XNamedValue {
 
@@ -57,19 +58,39 @@ public class FlutterVmServiceValue extends XNamedValue {
 
   @Override
   public boolean canNavigateToSource() {
-    return myLocalVarSourceLocation != null || myFieldRef != null;
+    return true;
+    /*     return myLocalVarSourceLocation != null || myFieldRef != null; or is widget. XXX*/
   }
 
   @Override
   public void computeSourcePosition(@NotNull final XNavigatable navigatable) {
+    if (myDebugProcess.getInspectorService() != null) {
+      final InspectorService.ObjectGroup inspector = myDebugProcess.getInspectorService().createObjectGroup("serviceValue");
+      inspector.safeWhenComplete(inspector.getCreationLocation(myInstanceRef), (location, error) -> {
+        if (error != null || location == null) {
+          computeSourcePositionFallback(navigatable);
+          return;
+        }
+        navigatable.setSourcePosition(location.getXSourcePosition());
+      });
+    }
+    else {
+      computeSourcePositionFallback(navigatable);
+    }
+  }
+
+  /**
+   * Fallback to compute the source position if there is not a custom Flutter
+   * interpretation of what the source location should be.
+   */
+  public void computeSourcePositionFallback(@NotNull final XNavigatable navigatable) {
     if (myLocalVarSourceLocation != null) {
       reportSourcePosition(myDebugProcess, navigatable, myIsolateId, myLocalVarSourceLocation.myScriptRef,
                            myLocalVarSourceLocation.myTokenPos);
     }
     else if (myFieldRef != null) {
       doComputeSourcePosition(myDebugProcess, navigatable, myIsolateId, myFieldRef);
-    }
-    else {
+    } else {
       navigatable.setSourcePosition(null);
     }
   }
@@ -97,6 +118,20 @@ public class FlutterVmServiceValue extends XNamedValue {
         navigatable.setSourcePosition(null);
       }
     });
+  }
+
+  /**
+   * Asynchronously calculates expression which evaluates to the current value
+   */
+  @NotNull
+  public Promise<XExpression> calculateEvaluationExpression() {
+    String expression = getEvaluationExpression();
+    if (true) {
+      throw new RuntimeException("IMPL! XXX");
+    }
+    XExpression res =
+      expression != null ? XDebuggerUtil.getInstance().createExpression(expression, null, null, EvaluationMode.EXPRESSION) : null;
+    return Promise.resolve(res);
   }
 
   @Override

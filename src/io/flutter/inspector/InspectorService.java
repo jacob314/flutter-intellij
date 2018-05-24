@@ -576,7 +576,6 @@ public class InspectorService implements Disposable {
      * Requires that the InstanceRef is really referring to a String that is valid JSON.
      */
     CompletableFuture<JsonElement> instanceRefToJson(InstanceRef instanceRef) {
-
       return nullIfDisposed(() -> getInspectorLibrary().getInstance(instanceRef, this).thenApplyAsync((Instance instance) -> {
         return nullValueIfDisposed(() -> {
           final String json = instance.getValueAsString();
@@ -647,6 +646,10 @@ public class InspectorService implements Disposable {
       return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::parseDiagnosticsNodesObservatory));
     }
 
+    CompletableFuture<JsonElement> parseJson(CompletableFuture<InstanceRef> instanceRefFuture) {
+      return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::parseDiagnosticsNodesObservatory));
+    }
+
     CompletableFuture<ArrayList<DiagnosticsNode>> parseDiagnosticsNodesDaemon(CompletableFuture<JsonElement> jsonFuture) {
       return nullIfDisposed(() -> jsonFuture.thenApplyAsync(this::parseDiagnosticsNodesHelper));
     }
@@ -660,6 +663,19 @@ public class InspectorService implements Disposable {
       }
     }
 
+    CompletableFuture<InspectorSourceLocation> getCreationLocation(InstanceRef instanceRef) {
+      if (!supportedServiceMethods.contains("getCreationLocation")) {
+        return CompletableFuture.completedFuture(null);
+      }
+      invokeServiceMethodOnRefObservatory("getCreationLocation", instanceRef);
+
+      return nullIfDisposed(() -> instanceRefToJson(pathRef).thenApplyAsync((JsonElement json) -> {
+        if (!json.isJsonObject()) {
+          return null;
+        }
+        return new InspectorSourceLocation((JsonObject)json, null);
+      });
+    }
     CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorInstanceRef instanceRef) {
       return getListHelper(instanceRef, "getProperties");
     }
