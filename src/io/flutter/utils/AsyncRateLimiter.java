@@ -47,11 +47,13 @@ public class AsyncRateLimiter implements Disposable {
     }
 
     if (pendingRequest != null && !pendingRequest.isDone()) {
+      requestScheduledButNotStarted = true;
       // Wait for the pending request to be done before scheduling the new
       // request. The existing request has already started so may return state
       // that is now out of date.
       whenCompleteUiThread(pendingRequest, (Object ignored, Throwable error) -> {
         pendingRequest = null;
+        requestScheduledButNotStarted = false;
         scheduleRequest();
       });
       return;

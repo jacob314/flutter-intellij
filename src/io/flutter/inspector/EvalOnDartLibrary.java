@@ -18,9 +18,16 @@ import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.consumer.EvaluateConsumer;
 import org.dartlang.vm.service.consumer.GetIsolateConsumer;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
+import org.dartlang.vm.service.consumer.ServiceExtensionConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
+import sun.misc.BASE64Decoder;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -132,6 +139,53 @@ public class EvalOnDartLibrary implements Disposable {
     myRequestsScheduler.dispose();
     subscription.dispose();
     // TODO(jacobr): complete all pending futures as cancelled?
+  }
+
+  public CompletableFuture<JsonObject> invokeServiceMethod(String method) {
+    CompletableFuture<JsonObject> ret = new CompletableFuture<>();
+    libraryRef.whenCompleteAsync((value, ex) -> {
+      if (ex != null) {
+        ret.completeExceptionally(ex);
+      }
+      vmService.callServiceExtension(isolateId, method, new ServiceExtensionConsumer() {
+
+        @Override
+        public void onError(RPCError error) {
+          ret.completeExceptionally(new RuntimeException(error.getMessage()));
+        }
+
+        @Override
+        public void received(JsonObject object) {
+          ret.complete(object);
+        }
+      });
+    });
+    return ret;
+  }
+
+  public CompletableFuture<BufferedImage> getScreenshot() {
+    return invokeServiceMethod("_flutter.screenshot").thenApplyAsync((JsonObject response) -> {
+      final String imageString = response.get("screenshot").getAsString();
+      // create a buffered image
+      byte[] imageBytes;
+      final BASE64Decoder decoder = new BASE64Decoder();
+      try {
+        imageBytes = decoder.decodeBuffer(imageString);
+      }
+      catch (IOException e) {
+        throw new RuntimeException("Error decoding base64 data: " + e.getMessage());
+      }
+      final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
+      BufferedImage image = null;
+      try {
+        image = ImageIO.read(byteArrayInputStream);
+        byteArrayInputStream.close();
+      }
+      catch (IOException e) {
+        throw new RuntimeException("Error decoding image: " + e.getMessage());
+      }
+      return image;
+    });
   }
 
   public CompletableFuture<InstanceRef> eval(String expression, Map<String, String> scope, InspectorService.ObjectGroup isAlive) {

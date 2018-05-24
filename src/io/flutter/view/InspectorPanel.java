@@ -27,13 +27,17 @@ import io.flutter.editor.FlutterMaterialIcons;
 import io.flutter.inspector.*;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.daemon.FlutterApp;
+import io.flutter.run.daemon.FlutterDevice;
+import io.flutter.sdk.XcodeUtils;
 import io.flutter.utils.*;
 import org.dartlang.vm.service.element.InstanceRef;
 import org.dartlang.vm.service.element.IsolateRef;
+import org.intellij.images.ui.ImageComponent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
+import javax.swing.Timer;
 import javax.swing.event.TreeExpansionEvent;
 import javax.swing.event.TreeExpansionListener;
 import javax.swing.event.TreeSelectionEvent;
@@ -46,8 +50,10 @@ import javax.swing.tree.TreePath;
 import java.awt.*;
 import java.awt.event.ComponentEvent;
 import java.awt.event.ComponentListener;
+import java.awt.image.BufferedImage;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
+import java.lang.System;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -76,6 +82,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   protected final InspectorPanel subtreePanel;
   final CustomIconMaker iconMaker = new CustomIconMaker();
   final Splitter treeSplitter;
+  final Splitter treeSplitterDevice;
   final Icon defaultIcon;
   final JBScrollPane treeScrollPane;
   private final InspectorTree myRootsTree;
@@ -109,6 +116,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    * TODO(jacobr): is there a way we can unify the selection and tree groups?
    */
   private final InspectorObjectGroupManager selectionGroups;
+  private final Timer mouseWatchTimer;
+  private final ImageComponent imageComponent;
 
   /**
    * Node being highlighted due to the current hover.
@@ -175,7 +184,13 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     refreshRateLimiter = new AsyncRateLimiter(REFRESH_FRAMES_PER_SECOND, this::refresh);
 
     final String parentTreeDisplayName = (parentTree != null) ? parentTree.treeType.displayName : null;
-
+    mouseWatchTimer = null;
+    /* mouseWatchTimer = new Timer(1000 / 30, (e) -> {
+      pollMousePosition();
+    });
+    mouseWatchTimer.setRepeats(true);
+    mouseWatchTimer.start();
+*/
     myRootsTree = new InspectorTree(
       new DefaultMutableTreeNode(null),
       treeType.displayName,
@@ -254,9 +269,20 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       Disposer.register(this, treeSplitter::dispose);
       Disposer.register(this, scrollAnimator::dispose);
       treeSplitter.setFirstComponent(treeScrollPane);
-      add(treeSplitter);
+      treeSplitterDevice = new Splitter(false);
+      treeSplitterDevice.setProportion(0.3f);
+      imageComponent = new ImageComponent();
+      imageComponent.setAutoscrolls(true);
+      imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
+      imageComponent.getDocument().getRenderer();
+      treeSplitterDevice.setFirstComponent(imageComponent);
+      treeSplitterDevice.setSecondComponent(treeSplitter);
+      add(treeSplitterDevice);
+
     }
     else {
+      imageComponent = null;
+      treeSplitterDevice = null;
       treeSplitter = null;
       myPropertiesPanel = null;
       add(treeScrollPane);
@@ -290,6 +316,24 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
         onIsolateStopped();
       }
     }, true);
+  }
+
+  Point lastGlobalMouseLocation;
+
+  boolean firstImage = true;
+
+  private void pollMousePosition() {
+    if (firstImage) {
+      Rectangle screen = new
+        Rectangle(Toolkit.getDefaultToolkit().getScreenSize());
+
+    }
+
+    Point mouseLocation = MouseInfo.getPointerInfo().getLocation();
+    if (!mouseLocation.equals(lastGlobalMouseLocation)) {
+  // XXX    LOG.info("Moue poisiton:" + mouseLocation);
+      lastGlobalMouseLocation = mouseLocation;
+    }
   }
 
   public boolean isHighlightNodesShownInBothTrees() {
@@ -449,19 +493,50 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       return CompletableFuture.completedFuture(null);
     }
 
+    final long startTime = System.currentTimeMillis();
+    if (imageComponent != null) {
+      LOG.info("ZZZ StartTime= " + startTime);
+    }
+
+    ArrayList<CompletableFuture<?>> futures = new ArrayList<>();
+    if (imageComponent != null) {
+      CompletableFuture<BufferedImage> screenshotFuture = getInspectorService().getScreenshot();
+      futures.add(screenshotFuture);
+      AsyncUtils.whenCompleteUiThread(screenshotFuture, (image, error) -> {
+        long timeDelta = System.currentTimeMillis() - startTime;
+        LOG.info("Time for screenshot in ms= " + timeDelta);
+        if (image == null || error != null) {
+          LOG.info("Error computing screenshot!");
+          return;
+        }
+        imageComponent.getDocument().setValue(image);
+        imageComponent.repaint();
+      });
+    }
+
     // TODO(jacobr): refresh the tree as well as just the properties.
     if (myPropertiesPanel != null) {
       myPropertiesPanel.refresh();
     }
+    futures.add(getPendingUpdateDone());
     if (myPropertiesPanel != null) {
-      return CompletableFuture.allOf(getPendingUpdateDone(), myPropertiesPanel.getPendingUpdateDone());
+      futures.add(myPropertiesPanel.getPendingUpdateDone());
     }
     else if (subtreePanel != null) {
-      return CompletableFuture.allOf(getPendingUpdateDone(), subtreePanel.getPendingUpdateDone());
+      futures.add(subtreePanel.getPendingUpdateDone());
     }
-    else {
-      return getPendingUpdateDone();
-    }
+    final CompletableFuture[] futuresArray = new CompletableFuture[futures.size()];
+    futures.toArray(futuresArray);
+
+    CompletableFuture<Void> allComplete = CompletableFuture.allOf(futuresArray);
+    allComplete.whenComplete((a,b) -> {
+      long timeDelta = System.currentTimeMillis() - startTime;
+      if (imageComponent != null) {
+        LOG.info("Time for refresh in ms= " + timeDelta);
+        LOG.info("StartTime= " + startTime);
+      }
+    });
+    return allComplete;
   }
 
   public void shutdownTree(boolean isolateStopped) {

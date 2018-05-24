@@ -23,6 +23,7 @@ import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 
+import java.awt.image.BufferedImage;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -166,6 +167,10 @@ public class InspectorService implements Disposable {
   public void dispose() {
     inspectorLibrary.dispose();
     setPubRootDirectoriesSubscription.dispose();
+  }
+
+  public CompletableFuture<BufferedImage> getScreenshot() {
+    return inspectorLibrary.getScreenshot();
   }
 
   public CompletableFuture<?> forceRefresh() {
@@ -584,6 +589,13 @@ public class InspectorService implements Disposable {
       }));
     }
 
+    /**
+     * Requires that the InstanceRef is really referring to a String that is valid JSON.
+     */
+    CompletableFuture<JsonElement> instanceRefToJson(CompletableFuture<InstanceRef> instanceRefFuture) {
+      return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::instanceRefToJson));
+    }
+
     CompletableFuture<ArrayList<DiagnosticsNode>> parseDiagnosticsNodesObservatory(InstanceRef instanceRef) {
       return nullIfDisposed(() -> instanceRefToJson(instanceRef).thenApplyAsync((JsonElement jsonElement) -> {
         return nullValueIfDisposed(() -> {
@@ -646,10 +658,6 @@ public class InspectorService implements Disposable {
       return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::parseDiagnosticsNodesObservatory));
     }
 
-    CompletableFuture<JsonElement> parseJson(CompletableFuture<InstanceRef> instanceRefFuture) {
-      return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::parseDiagnosticsNodesObservatory));
-    }
-
     CompletableFuture<ArrayList<DiagnosticsNode>> parseDiagnosticsNodesDaemon(CompletableFuture<JsonElement> jsonFuture) {
       return nullIfDisposed(() -> jsonFuture.thenApplyAsync(this::parseDiagnosticsNodesHelper));
     }
@@ -663,18 +671,20 @@ public class InspectorService implements Disposable {
       }
     }
 
-    CompletableFuture<InspectorSourceLocation> getCreationLocation(InstanceRef instanceRef) {
+    public CompletableFuture<InspectorSourceLocation> getCreationLocation(InstanceRef instanceRef) {
       if (!supportedServiceMethods.contains("getCreationLocation")) {
         return CompletableFuture.completedFuture(null);
-      }
-      invokeServiceMethodOnRefObservatory("getCreationLocation", instanceRef);
+      };
 
-      return nullIfDisposed(() -> instanceRefToJson(pathRef).thenApplyAsync((JsonElement json) -> {
-        if (!json.isJsonObject()) {
+      CompletableFuture<JsonElement> creationLocationFuture =
+        instanceRefToJson(invokeServiceMethodOnRefObservatory("getCreationLocation", instanceRef));
+
+      return nullIfDisposed(() -> creationLocationFuture.thenApplyAsync((JsonElement json) -> {
+        if (json == null || !json.isJsonObject()) {
           return null;
         }
         return new InspectorSourceLocation((JsonObject)json, null);
-      });
+      }));
     }
     CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorInstanceRef instanceRef) {
       return getListHelper(instanceRef, "getProperties");
