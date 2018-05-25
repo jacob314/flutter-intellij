@@ -155,12 +155,10 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
                                            Disposable parentDisposable,
                                            InspectorService inspectorService) {
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
-    toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
     if (inspectorService != null) {
-      toolbarGroup.addSeparator();
       toolbarGroup.add(registerAction(new ForceRefreshAction(app, inspectorService)));
+      toolbarGroup.addSeparator();
     }
-    toolbarGroup.addSeparator();
     toolbarGroup.add(registerAction(new DebugDrawAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
     toolbarGroup.add(registerAction(new PerformanceOverlayAction(app)));
@@ -415,6 +413,9 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
           onAppChanged(app);
           final PerAppState state = perAppViewState.remove(app);
           if (state != null && state.content != null) {
+            for (InspectorPanel panel : state.inspectorPanels) {
+              panel.dispose();
+            }
             contentManager.removeContent(state.content, true);
           }
           if (perAppViewState.isEmpty()) {
@@ -946,6 +947,8 @@ class OverflowAction extends AnAction implements RightAlignedToolbarAction {
     group.addSeparator();
     group.add(view.registerAction(new AutoHorizontalScrollAction(app, view.shouldAutoHorizontalScroll)));
     group.add(view.registerAction(new HighlightNodesShownInBothTrees(app, view.highlightNodesShownInBothTrees)));
+    group.addSeparator();
+    group.add(view.registerAction(new ToggleInspectModeAction(app)));
 
     return group;
   }

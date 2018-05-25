@@ -6,29 +6,36 @@
 package io.flutter.view;
 
 import com.google.common.base.Joiner;
+import com.intellij.ide.ui.UISettings;
+import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Splitter;
 import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.wm.*;
+import com.intellij.openapi.wm.ex.ToolWindowEx;
 import com.intellij.ui.*;
 import com.intellij.ui.components.JBScrollPane;
+import com.intellij.ui.content.Content;
+import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.dualView.TreeTableView;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.ui.treeStructure.treetable.ListTreeTableModelOnColumns;
 import com.intellij.util.ui.ColumnInfo;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
 import com.intellij.util.ui.tree.TreeUtil;
 import com.intellij.xdebugger.XSourcePosition;
+import icons.FlutterIcons;
 import io.flutter.FlutterBundle;
 import io.flutter.editor.FlutterMaterialIcons;
 import io.flutter.inspector.*;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.daemon.FlutterApp;
-import io.flutter.run.daemon.FlutterDevice;
-import io.flutter.sdk.XcodeUtils;
 import io.flutter.utils.*;
 import org.dartlang.vm.service.element.InstanceRef;
 import org.dartlang.vm.service.element.IsolateRef;
@@ -48,8 +55,7 @@ import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreeNode;
 import javax.swing.tree.TreePath;
 import java.awt.*;
-import java.awt.event.ComponentEvent;
-import java.awt.event.ComponentListener;
+import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
@@ -68,11 +74,13 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    * simulator or high powered native device. The frame rate is set low
    * for now mainly to minimize the risk of unintended consequences.
    */
-  public static final double REFRESH_FRAMES_PER_SECOND = 5.0;
+  public static final double REFRESH_FRAMES_PER_SECOND = 2.0;
+  public static final double MOUSE_FRAMES_PER_SECOND = 10.0;
   // We have to define this because SimpleTextAttributes does not define a
   // value for warnings.
   private static final SimpleTextAttributes WARNING_ATTRIBUTES = new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor.ORANGE);
   private static final Logger LOG = Logger.getInstance(InspectorPanel.class);
+  private static final String MIRRORWINDOW_ID = "Phone Mirror"; /// XXX make id.
   protected final boolean detailsSubtree;
   protected final boolean isSummaryTree;
   /**
@@ -85,6 +93,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   final Splitter treeSplitterDevice;
   final Icon defaultIcon;
   final JBScrollPane treeScrollPane;
+  JPanel tutorialPanel;
   private final InspectorTree myRootsTree;
   @Nullable private final PropertiesPanel myPropertiesPanel;
   private final Computable<Boolean> isApplicable;
@@ -100,6 +109,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    */
   private final boolean legacyMode;
   private final AsyncRateLimiter refreshRateLimiter;
+  private final AsyncRateLimiter hoverRateLimiter;
 
   /**
    * Groups used to manage and cancel requests to load data to display directly
@@ -117,7 +127,10 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    */
   private final InspectorObjectGroupManager selectionGroups;
   private final Timer mouseWatchTimer;
-  private final ImageComponent imageComponent;
+  private ImageComponent imageComponent;
+  private final Splitter treeSplitterSubdevice;
+  private ToolWindowEx mirrorToolWindow;
+  private ImageContainerPane imageContainerPane; // XXX final.
 
   /**
    * Node being highlighted due to the current hover.
@@ -140,6 +153,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    */
   private boolean visibleToUser = false;
   private boolean highlightNodesShownInBothTrees = false;
+  private CompletableFuture<DiagnosticsNode> nextHover;
+  private DiagnosticsNode currentHover;
 
   public InspectorPanel(FlutterView flutterView,
                         @NotNull FlutterApp flutterApp,
@@ -182,6 +197,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     this.defaultIcon = iconMaker.fromInfo("Default");
 
     refreshRateLimiter = new AsyncRateLimiter(REFRESH_FRAMES_PER_SECOND, this::refresh);
+    hoverRateLimiter = new AsyncRateLimiter(MOUSE_FRAMES_PER_SECOND, this::refreshHover);
 
     final String parentTreeDisplayName = (parentTree != null) ? parentTree.treeType.displayName : null;
     mouseWatchTimer = null;
@@ -204,6 +220,36 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     myRootsTree.setHorizontalAutoScrollingEnabled(false);
     myRootsTree.setAutoscrolls(false);
     myRootsTree.setToggleClickCount(0);
+
+    MouseListener showInspectorListener = new MouseListener() {
+      @Override
+      public void mouseClicked(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mousePressed(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mouseReleased(MouseEvent e) {
+
+      }
+
+      @Override
+      public void mouseEntered(MouseEvent e) {
+        DiagnosticsNode selection = getSelectedDiagnostic();
+        getFlutterApp().callBooleanExtension("ext.flutter.inspector.showSelection", true);
+      }
+
+      @Override
+      public void mouseExited(MouseEvent e) {
+        getFlutterApp().callBooleanExtension("ext.flutter.inspector.showSelection", false);
+      }
+    };
+    myRootsTree.addMouseListener(showInspectorListener);
+
 
     myRootsTree.addTreeExpansionListener(new MyTreeExpansionListener());
     InspectorTreeMouseListener mouseListener = new InspectorTreeMouseListener(this, myRootsTree);
@@ -271,21 +317,170 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       treeSplitter.setFirstComponent(treeScrollPane);
       treeSplitterDevice = new Splitter(false);
       treeSplitterDevice.setProportion(0.3f);
-      imageComponent = new ImageComponent();
-      imageComponent.setAutoscrolls(true);
-      imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
-      imageComponent.getDocument().getRenderer();
-      treeSplitterDevice.setFirstComponent(imageComponent);
-      treeSplitterDevice.setSecondComponent(treeSplitter);
-      add(treeSplitterDevice);
+      treeSplitterSubdevice = new Splitter(true);
+      treeSplitterSubdevice.setProportion((0.1f));
 
+      if (treeType.equals(InspectorService.FlutterTreeType.widget)) {
+        imageComponent = new ImageComponent();
+        imageComponent.setAutoscrolls(true);
+        imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
+        imageComponent.getDocument().getRenderer();
+        //      imageComponent.setGridVisible(true);
+        //    imageComponent.invalidate();
+
+        imageComponent.addMouseListener(new MouseListener() {
+          @Override
+          public void mouseClicked(MouseEvent e) {
+            // XXX move to a helper... compute earlier.
+            final Point point = e.getPoint();
+            final double width = imageComponent.getWidth();
+            final double height = imageComponent.getHeight();
+            // XXX use result
+            treeGroups.getCurrent().inspectAt(point.getX() / width, (double)point.getY() / height);
+          }
+
+          @Override
+          public void mousePressed(MouseEvent e) {
+
+          }
+
+          @Override
+          public void mouseReleased(MouseEvent e) {
+
+          }
+
+          @Override
+          public void mouseEntered(MouseEvent e) {
+
+          }
+
+          @Override
+          public void mouseExited(MouseEvent e) {
+            lastHoverPosition = null;
+            setCurrentHover(null);
+          }
+        });
+        imageComponent.addMouseListener(showInspectorListener);
+
+        imageComponent.addMouseMotionListener(new MouseMotionListener() {
+          @Override
+          public void mouseDragged(MouseEvent e) {
+            lastHoverPosition = e.getPoint();
+            hoverRateLimiter.scheduleRequest();
+          }
+
+          @Override
+          public void mouseMoved(MouseEvent e) {
+            lastHoverPosition = e.getPoint();
+            hoverRateLimiter.scheduleRequest();
+          }
+        });
+        imageContainerPane = new ImageContainerPane(imageComponent);
+        imageContainerPane.add(new TextArea("Hello world!!!"));
+
+        JScrollPane imageScrollPane = ScrollPaneFactory.createScrollPane(imageContainerPane, true);
+        imageContainerPane.setScaleParent(imageScrollPane);
+
+        imageScrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        imageScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        UIUtil.invokeLaterIfNeeded(() -> {
+          final Project project = flutterApp.getProject();
+          if (project.isDisposed()) {
+            return;
+          }
+
+          mirrorToolWindow = (ToolWindowEx)ToolWindowManager
+            .getInstance(project).registerToolWindow(MIRRORWINDOW_ID, false, ToolWindowAnchor.BOTTOM, flutterApp.getProject(), true);
+
+          final Content content = ContentFactory.SERVICE.getInstance().createContent(imageScrollPane, "", false);
+          mirrorToolWindow.getContentManager().addContent(content);
+          mirrorToolWindow.setAnchor(ToolWindowAnchor.RIGHT, () -> {});
+          mirrorToolWindow.setSplitMode(true, () -> {});
+          mirrorToolWindow.setAutoHide(false);
+          mirrorToolWindow.setType(ToolWindowType.WINDOWED, () -> {
+            int desiredHeight = 300;
+            int height = mirrorToolWindow.getComponent().getHeight();
+            mirrorToolWindow.stretchHeight(desiredHeight - height);
+          });
+          mirrorToolWindow.getComponent().setMinimumSize(new Dimension(120, 200));
+          UISettings.getInstance().setWideScreenSupport(true);
+          UISettings.getInstance().fireUISettingsChanged();
+          /*
+          JLayeredPane balloonPane = new JLayeredPane();
+          JLabel l = new JLabel();
+          l.setText("HAHA");
+          l.setIcon(FlutterIcons.PhoneMirrorIntro);
+          mirrorToolWindow.setIcon(FlutterIcons.Phone);
+          mirrorToolWindow.setAutoHide(false);
+          balloonPane.setLayer(l, 1);*/
+
+          ToolWindowEx toolWindowEx = (ToolWindowEx)mirrorToolWindow;
+          // XXXX
+          //   toolWindowEx.setTitleActions(new AnalysisServerFeedbackAction());
+          // ArrayList<AnAction> gearActions = new ArrayList<>();
+          // toolWindowEx.setAdditionalGearActions(new DefaultActionGroup(gearActions));
+
+          /* XXXX
+          myPanel.setToolWindowUpdater(new ToolWindowUpdater() {
+            @Override
+            public void setIcon(@NotNull Icon icon) {
+              // myCurrentIcon = icon;
+              // XXX updateIcon();
+            }
+
+            @Override
+            public void setHeaderText(@NotNull String headerText) {
+              content.setDisplayName(headerText);
+            }
+          });
+          */
+
+          /* // XXX
+          if (PropertiesComponent.getInstance(project).getBoolean("flutter.tool.mirror.window.force.activate", true)) {
+            PropertiesComponent.getInstance(project).setValue("flutter.tool.mirror.window.force.activate", false, true);
+
+          }*/
+          mirrorToolWindow.activate(null, false);
+
+          Disposer.register(project, () -> mirrorToolWindow.getContentManager().removeAllContents(true));
+        });
+
+
+        PropertyChangeListener imageSizeChange = new PropertyChangeListener() {
+
+          @Override
+          public void propertyChange(PropertyChangeEvent evt) {
+            imageContainerPane.invalidate();
+          }
+        };
+      }
+
+      add(treeSplitter);
     }
     else {
       imageComponent = null;
+      imageContainerPane = null;
       treeSplitterDevice = null;
       treeSplitter = null;
+      treeSplitterSubdevice = null;
       myPropertiesPanel = null;
-      add(treeScrollPane);
+      if (parentTree != null) {
+        JLabel emptyLabel = new JLabel();
+        emptyLabel.setIcon(FlutterIcons.PhoneMirrorIntro);
+        emptyLabel.setText(null);
+        tutorialPanel = new JPanel();
+        tutorialPanel.setLayout(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+         gbc.anchor = GridBagConstraints.SOUTH;
+         gbc.weighty = 1;
+
+        tutorialPanel.add(emptyLabel, gbc);
+        tutorialPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        add(tutorialPanel);
+      } else {
+        add(treeScrollPane);
+      }
     }
 
     this.addComponentListener(new ComponentListener() {
@@ -302,6 +497,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       @Override
       public void componentShown(ComponentEvent e) {
         determineSplitterOrientation();
+        if (imageContainerPane != null) {
+          imageContainerPane.invalidate();
+        }
       }
 
       @Override
@@ -321,6 +519,92 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
   Point lastGlobalMouseLocation;
 
   boolean firstImage = true;
+
+
+  private static final class ImageContainerPane extends JLayeredPane {
+      private final ImageComponent imageComponent;
+      private JScrollPane scaleParent;
+    private DiagnosticsNode hover;
+
+    public ImageContainerPane(ImageComponent imageComponent) {
+          this.imageComponent = imageComponent;
+          add(imageComponent);
+      }
+
+      public void setScaleParent(JScrollPane scaleParent) {
+        this.scaleParent = scaleParent;
+      }
+
+      private void centerComponents() {
+          Rectangle bounds = getBounds();
+          Point point = imageComponent.getLocation();
+          BufferedImage image = imageComponent.getDocument().getValue();
+          if (image != null) {
+
+            Rectangle scaleBounds = scaleParent.getBounds();
+            double width = image.getWidth();
+            double height = image.getHeight();
+            double scaleWidth = (scaleBounds.getWidth() - 4) / width;
+            double scaleHeight = (scaleBounds.getHeight() - 4)/ height;
+            double scale = Math.min(scaleWidth, scaleHeight);
+
+            Dimension existing = imageComponent.getCanvasSize();
+            Dimension newDimension = new Dimension((int)Math.floor(width * scale), (int)Math.floor(height * scale));
+            if (!existing.equals(newDimension)) {
+              imageComponent.setCanvasSize(newDimension);
+              imageComponent.invalidate(); // XXX not needed.
+            }
+          }
+
+          point.x = (bounds.width - imageComponent.getWidth()) / 2;
+          point.y = (bounds.height - imageComponent.getHeight()) / 2;
+          bounds.getWidth();
+          imageComponent.setLocation(point);
+      }
+
+      public void invalidate() {
+          centerComponents();
+          super.invalidate();
+      }
+
+      public Dimension getPreferredSize() {
+          return imageComponent.getSize();
+      }
+
+    public void setHover(DiagnosticsNode hover) {
+      if (hover != this.hover) {
+        this.hover = hover;
+        this.repaint();
+      }
+    }
+
+    @Override
+    public void paint(Graphics g) {
+      super.paint(g);
+      if (hover != null) {
+        Rectangle box = hover.getBoundingBox();
+        if (box != null) {
+          double scale = (double)imageComponent.getCanvasSize().getWidth() / (double)imageComponent.getDocument().getValue().getWidth() ;
+          scale *= 2.0; // XXX hack to fix from device to physical pixels. XXX!!!
+          double offset;
+          double x = box.getX() * scale + imageComponent.getLocation().getX() + 2;
+          double y = box.getY() * scale + imageComponent.getLocation().getY() + 2;
+          double width = box.getWidth() * scale;
+          double height = box.getHeight() * scale;
+          g.setColor(new Color(  128, 128, 255, 64));// Lower alpha than on device (128)
+          g.fillRect((int)x, (int)y, (int)width, (int)height);
+          g.setColor(new  Color( 64, 64, 128, 128));
+          g.drawRect((int)x, (int)y, (int)width, (int)height);
+/*
+          String text = hover.getDescription();
+          g.getFontMetrics().getStringBounds()
+          g.drawString(, (int)x, (int)y - 20);
+          */
+        }
+      }
+    }
+  }
+
 
   private void pollMousePosition() {
     if (firstImage) {
@@ -432,6 +716,9 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     if (vertical != treeSplitter.getOrientation()) {
       treeSplitter.setOrientation(vertical);
     }
+    if (imageContainerPane != null) {
+      imageContainerPane.invalidate();
+    }
   }
 
   protected boolean hasDiagnosticsValue(InspectorInstanceRef ref) {
@@ -486,6 +773,40 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     return ret;
   }
 
+  Point lastHoverPosition;
+
+  private CompletableFuture<?> refreshHover() {
+    if (!visibleToUser) {
+      // We will refresh again once we are visible.
+      // There is a risk a refresh got triggered before the view was visble.
+      return CompletableFuture.completedFuture(null);
+    }
+
+    if (lastHoverPosition == null) {
+      setCurrentHover(null);
+      return CompletableFuture.completedFuture(null);
+    }
+
+    final Point point = lastHoverPosition;
+    final double width = imageComponent.getWidth();
+    final double height = imageComponent.getHeight();
+    nextHover = treeGroups.getCurrent().hoverAt(point.getX() / width, (double)point.getY() / height);
+    treeGroups.getCurrent().safeWhenComplete(nextHover, (node, error) -> {
+      if (error != null) {
+        return;
+      }
+      setCurrentHover(node);
+    });
+    return nextHover;
+  }
+
+  private void setCurrentHover(DiagnosticsNode node) {
+    currentHover = node;
+    if (imageContainerPane != null) {
+      imageContainerPane.setHover(currentHover);
+    }
+  }
+
   private CompletableFuture<?> refresh() {
     if (!visibleToUser) {
       // We will refresh again once we are visible.
@@ -499,7 +820,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
 
     ArrayList<CompletableFuture<?>> futures = new ArrayList<>();
-    if (imageComponent != null) {
+    if (imageComponent != null && mirrorToolWindow != null && mirrorToolWindow.isVisible()) {
+      // XXX need to refresh mirrorToolWindow when it becomes visible.
       CompletableFuture<BufferedImage> screenshotFuture = getInspectorService().getScreenshot();
       futures.add(screenshotFuture);
       AsyncUtils.whenCompleteUiThread(screenshotFuture, (image, error) -> {
@@ -510,6 +832,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
           return;
         }
         imageComponent.getDocument().setValue(image);
+        imageComponent.invalidate();
+
         imageComponent.repaint();
       });
     }
@@ -553,6 +877,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
     selectedNode = null;
     subtreeRoot = null;
+    nextHover = null;
 
     getTreeModel().setRoot(new DefaultMutableTreeNode());
     if (subtreePanel != null) {
@@ -718,6 +1043,12 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
       // Passing in a null node indicates we should clear the subtree and free any memory allocated.
       shutdownTree(false);
       return;
+    }
+
+    if (tutorialPanel != null) {
+      remove(tutorialPanel);
+      add(treeScrollPane);
+      tutorialPanel = null;
     }
 
     // Clear now to eliminate frame of highlighted nodes flicker.
@@ -1276,6 +1607,12 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
 
   @Override
   public void dispose() {
+    if (mirrorToolWindow != null) {
+      ToolWindowManager
+        .getInstance(getFlutterApp().getProject()).unregisterToolWindow(MIRRORWINDOW_ID);
+      mirrorToolWindow = null;
+    }
+
     flutterIsolateSubscription.dispose();
     // TODO(jacobr): actually implement.
     final InspectorService service = getInspectorService();

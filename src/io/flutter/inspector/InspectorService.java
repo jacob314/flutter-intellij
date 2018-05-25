@@ -447,6 +447,14 @@ public class InspectorService implements Disposable {
       return invokeServiceMethodDaemon(methodName, params);
     }
 
+    CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, double x, double y, String objectGroup) {
+      final Map<String, Object> params = new HashMap<>();
+      params.put("x", x);
+      params.put("y", y);
+      params.put("objectGroup", objectGroup);
+      return invokeServiceMethodDaemon(methodName, params);
+    }
+
     // All calls to invokeServiceMethodDaemon bottom out to this call.
     CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, Map<String, Object> params) {
       return getInspectorLibrary().addRequest(this, () -> getApp().callServiceExtension("ext.flutter.inspector." + methodName, params)
@@ -464,6 +472,16 @@ public class InspectorService implements Disposable {
         return invokeServiceMethodDaemon(methodName, null, groupName);
       }
       return invokeServiceMethodDaemon(methodName, arg.getId(), groupName);
+    }
+
+    public CompletableFuture<DiagnosticsNode> inspectAt(double x, double y) {
+      // TODO(jacobr): support observatory protocol as well. XXX
+      return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("inspectAt", x, y, groupName));
+    }
+
+    public CompletableFuture<DiagnosticsNode> hoverAt(double x, double y) {
+      // TODO(jacobr): support observatory protocol as well. XXX
+      return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("hoverAt", x, y, groupName));
     }
 
     CompletableFuture<InstanceRef> invokeServiceMethodObservatory(String methodName, InspectorInstanceRef arg) {
