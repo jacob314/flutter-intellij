@@ -314,6 +314,26 @@ public class InspectorService implements Disposable {
     });
   }
 
+
+  /**
+   * Returns metadata describing objects that should have custom debugger representations for Flutter.
+   */
+  public CompletableFuture<Double> getScrollControllerOffset(InstanceRef instanceRef) {
+    final HashMap<String, String> scope = new HashMap<>();
+    scope.put("controller", instanceRef.getId());
+    return getInspectorLibrary().evalOnVmServiceWrapper("controller.value", scope).thenApplyAsync((v)-> {
+      return Double.parseDouble(v.getValueAsString());
+    });
+  }
+
+  public CompletableFuture<InstanceRef> animateScrollController(InstanceRef instanceRef, double value) {
+    final HashMap<String, String> scope = new HashMap<>();
+    scope.put("controller", instanceRef.getId());
+
+    return getInspectorLibrary().evalOnVmServiceWrapper("WidgetInspectorService.instance.setScrollPosition(controller, " + value + ")", scope);
+//    return getInspectorLibrary().evalOnVmServiceWrapper("controller.animateTo(" + value + ", duration: new Duration(milliseconds: 200), Curves.linear)", scope);
+  }
+
   public CompletableFuture<Instance> getInstance(InstanceRef instanceRef) {
     return getInspectorLibrary().getInstance(instanceRef, null);
   }
@@ -503,15 +523,6 @@ public class InspectorService implements Disposable {
       return invokeServiceMethodDaemon(methodName, params);
     }
 
-    CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, InspectorInstanceRef ref, double width, double height, String objectGroup) {
-      final Map<String, Object> params = new HashMap<>();
-      params.put("id", ref.getId());
-      params.put("width", width);
-      params.put("height", height);
-      params.put("objectGroup", objectGroup);
-      return invokeServiceMethodDaemon(methodName, params);
-    }
-
     // All calls to invokeServiceMethodDaemon bottom out to this call.
     CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, Map<String, Object> params) {
       return getInspectorLibrary().addRequest(this, () -> getApp().callServiceExtension("ext.flutter.inspector." + methodName, params)
@@ -536,8 +547,15 @@ public class InspectorService implements Disposable {
       return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("inspectAt", x, y, groupName));
     }
 
-    public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef instanceRef, int width, int height) {
-      return invokeServiceMethodDaemon("screenshot", instanceRef, width, height, groupName).thenApplyAsync((JsonElement response) -> {
+    /// XXX doesn't really require an ObjectGroup.
+    public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef instanceRef, int width, int height, boolean debugPaint, double maxPixelRatio) {
+      final Map<String, Object> params = new HashMap<>();
+      params.put("id", instanceRef.getId());
+      params.put("width", width);
+      params.put("height", height);
+      params.put("debugPaint", debugPaint);
+      params.put("maxPixelRatio", maxPixelRatio);
+      return invokeServiceMethodDaemon("screenshot", params).thenApplyAsync((JsonElement response) -> {
         if (response == null|| response.isJsonNull()) {
           return null;
         }

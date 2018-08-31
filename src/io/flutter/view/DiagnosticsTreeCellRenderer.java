@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 
 import static io.flutter.utils.JsonUtils.getIntMember;
 
-class DiagnosticsTreeCellRenderer extends InspectorColoredTreeCellRenderer {
+public class DiagnosticsTreeCellRenderer extends InspectorColoredTreeCellRenderer {
   // TODO(jacobr): enable this experiment once we make the link actually clickable.
   private static final boolean SHOW_RENDER_OBJECT_PROPERTIES_AS_LINKS = false;
 

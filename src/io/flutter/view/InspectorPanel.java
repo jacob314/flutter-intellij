@@ -78,8 +78,8 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
    * simulator or high powered native device. The frame rate is set low
    * for now mainly to minimize the risk of unintended consequences.
    */
-  public static final double REFRESH_FRAMES_PER_SECOND = 0.1;
-  public static final double MOUSE_FRAMES_PER_SECOND = 1.0;
+  public static final double REFRESH_FRAMES_PER_SECOND = 5.0;
+  public static final double MOUSE_FRAMES_PER_SECOND = 5.0;
   // We have to define this because SimpleTextAttributes does not define a
   // value for warnings.
   private static final SimpleTextAttributes WARNING_ATTRIBUTES = new SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, JBColor.ORANGE);
@@ -861,7 +861,7 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
           screenshotGroup.getRenderObjectForScreenshot().thenComposeAsync((DiagnosticsNode screenshotRoot) -> {
 
             CompletableFuture<BufferedImage> screenshotFuture = screenshotGroup
-              .getScreenshot(screenshotRoot.getValueRef(), Math.round((size.width - 4) * scale), Math.round((size.height - 4) * scale));
+              .getScreenshot(screenshotRoot.getValueRef(), Math.round((size.width - 4) * scale), Math.round((size.height - 4) * scale), false, scale);
 
             screenshotGroup.safeWhenComplete(CompletableFuture.allOf(screenshotFuture, selectedRenderObjectFuture), (ignored, error) -> {
               final BufferedImage image = screenshotFuture.getNow(null);

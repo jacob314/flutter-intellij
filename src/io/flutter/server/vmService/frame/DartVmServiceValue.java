@@ -1,34 +1,27 @@
 package io.flutter.server.vmService.frame;
 
-import com.intellij.debugger.ui.tree.render.CustomPopupFullValueEvaluator;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.editor.colors.TextAttributesKey;
 import com.intellij.openapi.util.Ref;
 import com.intellij.openapi.util.text.StringUtil;
-import com.intellij.openapi.wm.impl.status.TextPanel;
 import com.intellij.ui.Colors;
 import com.intellij.ui.LayeredIcon;
-import com.intellij.ui.ScrollPaneFactory;
-import com.intellij.ui.TextComponent;
+import com.intellij.util.ui.JBUI;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.frame.*;
 import com.intellij.xdebugger.frame.presentation.XKeywordValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XNumericValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XStringValuePresentation;
 import com.intellij.xdebugger.frame.presentation.XValuePresentation;
-import com.sun.org.apache.xpath.internal.operations.Bool;
 import icons.FlutterIcons;
 import io.flutter.editor.FlutterMaterialIcons;
 import io.flutter.inspector.DebuggerMetadata;
-import io.flutter.inspector.DiagnosticsNode;
 import io.flutter.inspector.InspectorInstanceRef;
 import io.flutter.inspector.InspectorService;
-import io.flutter.run.FlutterDebugProcess;
 import io.flutter.server.vmService.*;
 import io.flutter.utils.ColorIconMaker;
+import io.flutter.utils.IconSlice;
 import io.flutter.view.FlutterView;
-import io.flutter.view.InspectorPanel;
 import org.dartlang.vm.service.consumer.GetObjectConsumer;
 import org.dartlang.vm.service.element.*;
 import org.intellij.images.ui.ImageComponent;
@@ -36,10 +29,13 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
 import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+
+import static io.flutter.inspector.ScreenshotAction.createScreenshotComponent;
 
 // TODO: implement some combination of XValue.getEvaluationExpression() /
 // XValue.calculateEvaluationExpression() in order to support evaluate expression in variable values.
@@ -286,7 +282,7 @@ public class DartVmServiceValue extends XNamedValue {
             int alpha = getIntProperty("alpha");
             final Color color = new Color(red, green, blue, alpha);
             String value = alpha == 255 ? String.format("#%02x%02x%02x", red, green, blue) : String.format("#%02x%02x%02x%02x", alpha, red, green, blue);
-            node.setPresentation(colorIconMaker.getCustomIcon(color), myInstanceRef.getClassRef().getName(), value, true);
+            node.setPresentation(new IconSlice(getIcon(), colorIconMaker.getCustomIcon(color), 0, 21), myInstanceRef.getClassRef().getName(), value, true);
             return true;
           }
 
@@ -296,7 +292,7 @@ public class DartVmServiceValue extends XNamedValue {
             if (codePoint > 0) {
               final Icon icon = FlutterMaterialIcons.getMaterialIconForHex(String.format("%1$04x", codePoint));
               if (icon != null) {
-                node.setPresentation(icon, myInstanceRef.getClassRef().getName(), "SOME ICON", true);
+                node.setPresentation(new IconSlice(getIcon(), icon, 0, 21), myInstanceRef.getClassRef().getName(), "SOME ICON", true);
                 return true;
               }
             }
@@ -425,8 +421,103 @@ public class DartVmServiceValue extends XNamedValue {
       computeCollectionChildren(node);
     }
     else {
+      ClassRef classRef = myInstanceRef.getClassRef();
+      switch (classRef.getName()) {
+        case "Color": {
+          int red = getIntProperty("red");
+          int green = getIntProperty("green");
+          int blue = getIntProperty("blue");
+          int alpha = getIntProperty("alpha");
+          final Color color = new Color(red, green, blue, alpha);
+          String value = alpha == 255 ? String.format("#%02x%02x%02x", red, green, blue) : String.format("#%02x%02x%02x%02x", alpha, red, green, blue);
+          node.addChildren(XValueChildrenList.singleton(new XNamedValue("") {
+            @Override
+            public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+              node.setPresentation(new IconSlice(getIcon(), colorIconMaker.getCustomIcon(color), 1, 21), new XValuePresentation() {
+                @Override
+                public void renderValue(@NotNull XValueTextRenderer renderer) {
+                }
+
+                @Override
+                public String getSeparator() {
+                  return " ";
+                }
+              }, false);
+            }
+          }), false);
+
+          break;
+        }
+
+        case "IconData": {
+          // IconData(U+0E88F)
+          final int codePoint = getIntProperty("codePoint");
+          if (codePoint > 0) {
+            final Icon icon = FlutterMaterialIcons.getMaterialIconForHex(String.format("%1$04x", codePoint));
+            if (icon != null) {
+              node.addChildren(XValueChildrenList.singleton(new XNamedValue("") {
+
+                @Override
+                public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+                  node.setPresentation(new IconSlice(getIcon(), icon, 1, 21), new XValuePresentation() {
+                    @Override
+                    public void renderValue(@NotNull XValueTextRenderer renderer) {
+                    }
+
+                    @Override
+                    public String getSeparator() {
+                      return " ";
+                    }
+                  }, false);
+                }
+              }), false);
+              break;
+            }
+          }
+          break;
+        }
+      }
       InspectorService inspectorService = getInspectorService();
       CompletableFuture<?> readyForMoreChildren = CompletableFuture.completedFuture(null);
+      if (myInstanceRef.getClassRef().getName().equals("AnimationController") ||
+          myInstanceRef.getClassRef().getName().equals("CurvedAnimation")) {
+        node.addChildren(XValueChildrenList.singleton(new XNamedValue("animateTo") {
+
+          @Override
+          public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+            node.setPresentation(FlutterIcons.Animation, new XValuePresentation() {
+              @Override
+              public void renderValue(@NotNull XValueTextRenderer renderer) {
+              }
+
+              @Override
+              public String getSeparator() {
+                return " ";
+              }
+            }, false);
+            node.setFullValueEvaluator(new DartCustomPopupEvaluator<Double>("set", myDebugProcess) {
+              @Override
+              protected CompletableFuture<Double> getData() {
+                return inspectorService.getScrollControllerOffset(myInstanceRef);
+              }
+
+              @Override
+              protected JComponent createComponent(Double currentValue) {
+                final JSlider slider = new JSlider(0, 100, (int)Math.round(currentValue * 100));
+                slider.setPreferredSize(new Dimension(200, 30));
+                slider.addChangeListener(new ChangeListener() {
+                  @Override
+                  public void stateChanged(ChangeEvent e) {
+                    final double value = (double)slider.getValue() * 0.01;
+                    inspectorService.animateScrollController(myInstanceRef, value);
+                  }
+                });
+                return slider;
+              }
+            });
+          }
+        }), false);
+      }
       if (myInspectorMedata != null) {
         if (myInspectorMedata.isInspectable()) {
           node.addChildren(XValueChildrenList.singleton(new XNamedValue(myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element ? "Widget members" : "") {
@@ -465,50 +556,62 @@ public class DartVmServiceValue extends XNamedValue {
                return addFields(node, instance.getFields(), false);
             });
           }
+          if (myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element || myInspectorMedata.getKind() == DebuggerMetadata.Kind.RenderObject) {
+            InspectorService.ObjectGroup group = inspectorService.createObjectGroup("node_screenshots");
+            CompletableFuture<BufferedImage> imageFuture = group.toInspectorInstanceRef(myInstanceRef)
+              .thenComposeAsync((InspectorInstanceRef inspectorRef) -> group.getScreenshot(inspectorRef, 100, 100, false, JBUI.pixScale()));
+
+            readyForMoreChildren = CompletableFuture.allOf(readyForMoreChildren, imageFuture).thenApplyAsync((ignored) -> {
+              // it is fine if readyForMoreChildren completed exceptionally.
+              final BufferedImage image = imageFuture.getNow(null);
+
+              if (image != null && myInspectorMedata != null && myInspectorMedata.isInspectable()) {
+                node.addChildren(XValueChildrenList.singleton(new XNamedValue("SCREENYXXX") {
+
+                  @Override
+                  public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
+                    node.setPresentation(FlutterIcons.Assets, new XValuePresentation() {
+                      @Override
+                      public void renderValue(@NotNull XValueTextRenderer renderer) {
+                      }
+
+                      @Override
+                      public String getSeparator() {
+                        return "";
+                      }
+                    }, false);
+                    node.setFullValueEvaluator(new DartCustomPopupEvaluator<BufferedImage>("show large screenshot", myDebugProcess) {
+                      @Override
+                      protected CompletableFuture<BufferedImage> getData() {
+                        // XXX there is hella duplicated code here.
+                        InspectorService.ObjectGroup group = inspectorService.createObjectGroup("node_screenshots");
+                        return group.toInspectorInstanceRef(myInstanceRef).thenComposeAsync((InspectorInstanceRef inspectorRef) -> group.getScreenshot(inspectorRef, 1000, 1000, true, JBUI.pixScale()));
+                      }
+
+                      @Override
+                      protected JComponent createComponent(BufferedImage image) {
+                        if (image == null) {
+                          return null;
+                        }
+                        createScreenshotComponent(image, JBUI.pixScale());
+                        final ImageComponent imageComponent = new ImageComponent();
+                        imageComponent.setAutoscrolls(true);
+                        imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
+                        imageComponent.getDocument().setValue(image);
+                        imageComponent.setPreferredSize(new Dimension(image.getWidth(), image.getHeight()));
+                        return imageComponent;
+                      }
+                    });
+                  }
+                }), false);
+              }
+              return null;
+            });
+          }
         }
       }
 
       readyForMoreChildren.whenCompleteAsync((v, t) -> {
-        // it is fine if readyForMoreChildren completed exceptionally.
-        if (myInspectorMedata != null && myInspectorMedata.isInspectable()) {
-          node.addChildren(XValueChildrenList.singleton(new XNamedValue(myInspectorMedata.getKind() == DebuggerMetadata.Kind.Element ? "Element members " : "") {
-            @Override
-
-            public void computePresentation(@NotNull XValueNode node, @NotNull XValuePlace place) {
-              node.setPresentation(FlutterIcons.Assets, new XValuePresentation() {
-                @Override
-                public void renderValue(@NotNull XValueTextRenderer renderer) {
-                }
-
-                @Override
-                public String getSeparator() {
-                  return "";
-                }
-              }, false);
-              node.setFullValueEvaluator(new DartCustomPopupEvaluator<BufferedImage>("Show Screenshot", myDebugProcess) {
-                @Override
-                protected CompletableFuture<BufferedImage> getData() {
-                  InspectorService.ObjectGroup group = inspectorService.createObjectGroup("node_screenshots");
-                  return group.toInspectorInstanceRef(myInstanceRef).thenComposeAsync((InspectorInstanceRef inspectorRef) -> group.getScreenshot(inspectorRef, 500, 500));
-                }
-
-                @Override
-                protected JComponent createComponent(BufferedImage image) {
-                  if (image == null) {
-                    return null;
-                  }
-                  final ImageComponent imageComponent = new ImageComponent();
-                  imageComponent.setAutoscrolls(true);
-                  imageComponent.setTransparencyChessboardBlankColor(Colors.DARK_BLUE);
-                  imageComponent.getDocument().setValue(image);
-                  imageComponent.setPreferredSize(new Dimension(image.getWidth(), image.getHeight()));
-                  return imageComponent;
-                }
-              });
-            }
-          }), false);
-        }
-
         myDebugProcess.getVmServiceWrapper().getObject(myIsolateId, myInstanceRef.getId(), new GetObjectConsumer() {
           @Override
           public void received(Obj instance) {

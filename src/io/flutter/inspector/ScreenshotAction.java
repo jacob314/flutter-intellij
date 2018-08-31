@@ -15,6 +15,7 @@ import com.intellij.ui.AppUIUtil;
 import com.intellij.ui.Colors;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.awt.RelativePoint;
+import com.intellij.util.ui.JBUI;
 import com.intellij.xdebugger.XDebuggerManager;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.frame.XNavigatable;
@@ -55,8 +56,9 @@ public class ScreenshotAction extends InspectorTreeActionBase {
     FlutterInitializer.getAnalytics().sendEvent("inspector", id);
 
     final InspectorService.ObjectGroup service = diagnosticsNode.getInspectorService();
+    final double devicePixelRatio = JBUI.pixScale();
     service.safeWhenComplete(
-      service.getScreenshot(diagnosticsNode.getValueRef(), 500, 500),
+      service.getScreenshot(diagnosticsNode.getValueRef(), 1000, 1000, true, devicePixelRatio),
       (BufferedImage image, Throwable t) -> {
         if (t != null) {
           // TODO(jacobr): explain what went wrong.
@@ -64,7 +66,7 @@ public class ScreenshotAction extends InspectorTreeActionBase {
           // rendered so a screenshot cannot be shown.
           return;
         }
-        final JComponent imageComponent = createScreenshotComponent(image);
+        final JComponent imageComponent = createScreenshotComponent(image, devicePixelRatio);
 
         final JBPopup popup = DebuggerUIUtil.createValuePopup(project, imageComponent, null);
         final JFrame frame = WindowManager.getInstance().getFrame(project);
@@ -92,10 +94,10 @@ public class ScreenshotAction extends InspectorTreeActionBase {
       final int w = image.getWidth();
       final int h = image.getHeight();
 
-      final int stepX = Math.max(1, w / 100);
-      final int stepY = Math.max(1, h / 100);
-      for (int y = stepY; y < h - stepY; y += stepY) {
-        for (int x = stepX; x < w - stepX; x += stepX) {
+      final int stepX = Math.max(1, w / 30);
+      final int stepY = Math.max(1, h / 30);
+      for (int y = stepY*5; y < h - stepY* 5; y += stepY) {
+        for (int x = stepX * 5; x < w - stepX * 5; x += stepX) {
           int pixel = image.getRGB(x, y);
           int alpha = (pixel >> 24) & 0xff;
           // Analyze neighbors of pixels that are generally transparent.
@@ -118,8 +120,8 @@ public class ScreenshotAction extends InspectorTreeActionBase {
       final int red = (pixel >> 16) & 0xff;
       final int green = (pixel >> 8) & 0xff;
       final int blue = (pixel) & 0xff;
-      final int maxChan = Math.max(Math.max(red, green), blue);
-      totalBrightness += maxChan;
+      final int avgChan = (red + green + blue) / 3;
+      totalBrightness += avgChan;
       totalSamples++;
     }
 
@@ -138,7 +140,7 @@ public class ScreenshotAction extends InspectorTreeActionBase {
   }
 
   @NotNull
-  public static JComponent createScreenshotComponent(BufferedImage image) {
+  public static JComponent createScreenshotComponent(BufferedImage image, double devicePixelRatio) {
     if (image == null) {
       return new JTextField("Image not available");
     }
@@ -154,7 +156,7 @@ public class ScreenshotAction extends InspectorTreeActionBase {
       imageComponent.setTransparencyChessboardWhiteColor(Color.white);
     }
     imageComponent.getDocument().setValue(image);
-    imageComponent.setPreferredSize(new Dimension(image.getWidth(), image.getHeight()));
+    imageComponent.setPreferredSize(new Dimension((int)(image.getWidth() / devicePixelRatio), (int)(image.getHeight() / devicePixelRatio)));
     return imageComponent;
   }
 }
