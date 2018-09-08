@@ -16,14 +16,12 @@ import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.ui.JBColor;
 import com.intellij.util.ui.GraphicsUtil;
 import com.intellij.util.ui.UIUtil;
-import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 
 import java.awt.*;
 import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
 
 class EditorPerfDecorations implements Disposable {
   private static final VirtualFileManager virtualFileManager = VirtualFileManager.getInstance();
@@ -60,62 +58,19 @@ class EditorPerfDecorations implements Disposable {
     });
   }
 
-  public void updateFromSourceReport(
-    ScriptManager scriptManager,
-    @NotNull VirtualFile reloadFile,
-    @NotNull SourceReport report
+  public void updateFromPerfSourceReport(
+    @NotNull VirtualFile file,
+    @NotNull PerfSourceReport report
   ) {
-    scriptManager.reset();
+    final FilePerfInfo perfInfo = new FilePerfInfo(file);
 
-    final java.util.List<ScriptRef> scripts = new ArrayList<>();
-    for (ScriptRef scriptRef : report.getScripts()) {
-      scripts.add(scriptRef);
-    }
-
-    final FilePerfInfo perfInfo = new FilePerfInfo(reloadFile);
-
-    for (SourceReportRange reportRange : report.getRanges()) {
-      final SourceReportCoverage coverage = reportRange.getCoverage();
-      if (coverage == null) {
-        continue;
-      }
-
-      if (coverage.getHits().isEmpty()) {
-        continue;
-      }
-
-      final ScriptRef scriptRef = scripts.get(reportRange.getScriptIndex());
-      final String uri = scriptRef.getUri();
-      if (uri.startsWith("file:")) {
-        final VirtualFile file = virtualFileManager.findFileByUrl(uri);
-        if (file != null && file.equals(reloadFile)) {
-          scriptManager.populateFor(scriptRef);
-
-          final Script script = scriptManager.getScriptFor(scriptRef);
-          if (script == null) {
-            continue;
-          }
-
-          for (List<Integer> encoded : script.getTokenPosTable()) {
-            perfInfo.addUncovered(encoded.get(0) - 1);
-          }
-
-          for (int tokenPos : coverage.getHits()) {
-            perfInfo.addCovered(scriptManager.getLineColumnPosForTokenPos(scriptRef, tokenPos));
-          }
-
-          for (int tokenPos : coverage.getMisses()) {
-            perfInfo.addUncovered(scriptManager.getLineColumnPosForTokenPos(scriptRef, tokenPos));
-          }
-        }
-      }
+    for (PerfSourceReport.Entry entry : report.getEntries()) {
+      perfInfo.addCounts(entry.line, entry.timeStamps);
     }
 
     // Calculate coverage info for file, display in the UI.
     ApplicationManager.getApplication().invokeLater(() -> {
-      final LineMarkerRenderer uncoveredRenderer = new UncoveredLineMarkerRenderer();
-      final TextAttributes coveredAttributes = new TextAttributes();
-      final TextAttributes uncoveredAttributes = new TextAttributes();
+      final TextAttributes rebuiltAttributes = new TextAttributes();
 
       assert fileEditor instanceof TextEditor;
       final Editor editor = ((TextEditor)fileEditor).getEditor();
@@ -123,33 +78,17 @@ class EditorPerfDecorations implements Disposable {
 
       removeHighlightersFromEditor(markupModel);
 
-      int markerCount = 0;
+      final long timestamp = System.currentTimeMillis();
+      perfInfo.getCounts(timestamp, (int line, int count) -> {
+        final RangeHighlighter rangeHighlighter = markupModel.addLineHighlighter(line - 1, HIGHLIGHTER_LAYER, rebuiltAttributes);
 
-      for (int line : perfInfo.getCoveredLines()) {
-        final RangeHighlighter rangeHighlighter = markupModel.addLineHighlighter(line, HIGHLIGHTER_LAYER, coveredAttributes);
-
-        final CoveredLineMarkerRenderer renderer =
-          new CoveredLineMarkerRenderer(!perfInfo.isCovered(line - 1), !perfInfo.isCovered(line + 1));
-        rangeHighlighter.setErrorStripeMarkColor(CoveredLineMarkerRenderer.coveredColor);
+        final CountLineMarkerRenderer renderer =
+          new CountLineMarkerRenderer(count);
+        // TODO(jacobr): consider removing these 3 lines?
+        rangeHighlighter.setErrorStripeMarkColor(CountLineMarkerRenderer.coveredColor);
         rangeHighlighter.setThinErrorStripeMark(true);
         rangeHighlighter.setLineMarkerRenderer(renderer);
-
-        markerCount++;
-      }
-
-      for (int line : perfInfo.getUncoveredLines()) {
-        final RangeHighlighter rangeHighlighter =
-          markupModel.addLineHighlighter(line, HIGHLIGHTER_LAYER, uncoveredAttributes);
-        rangeHighlighter.setLineMarkerRenderer(uncoveredRenderer);
-
-        markerCount++;
-      }
-
-      if (markerCount == 0) {
-        final RangeHighlighter rangeHighlighter =
-          markupModel.addLineHighlighter(0, HIGHLIGHTER_LAYER, new TextAttributes());
-        rangeHighlighter.setLineMarkerRenderer(new BlankLineMarkerRenderer());
-      }
+      });
 
       hasDecorations = true;
     });
@@ -198,73 +137,36 @@ abstract class FlutterLineMarkerRenderer implements LineMarkerRenderer, LineMark
   }
 }
 
-class CoveredLineMarkerRenderer extends FlutterLineMarkerRenderer {
+class CountLineMarkerRenderer extends FlutterLineMarkerRenderer {
   static final Color coveredColor = new JBColor(new Color(0x0091ea), new Color(0x0091ea));
 
-  private final boolean isStart;
-  private final boolean isEnd;
+  private final int count;
 
-  CoveredLineMarkerRenderer(boolean isStart, boolean isEnd) {
-    this.isStart = isStart;
-    this.isEnd = isEnd;
+  CountLineMarkerRenderer(int count) {
+    this.count = count;
   }
 
-  static int hue = 0;
   @Override
   public void paint(Editor editor, Graphics g, Rectangle r) {
     final int height = r.height;
 
     GraphicsUtil.setupAAPainting(g);
-    //g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
     final Font font = UIUtil.getFont(UIUtil.FontSize.MINI, UIUtil.getButtonFont());
     g.setFont(font);
 
-    String text = Integer.toString(new Random().nextInt(100));
+    final String text = Integer.toString(count);
 
     final Rectangle2D bounds = g.getFontMetrics().getStringBounds(text, g);
 
     final int width = Math.max(r.width, (int)bounds.getWidth() + 4);
 
-    hue += 10;
-    hue = hue % 360;
-    Color backgroundColor = Color.getHSBColor((float)hue / 360.0f, 1.0f, 1.0f);
+    final Color backgroundColor = Color.getHSBColor((float)25.0 / 360.0f, 1.0f, 1.0f);
     g.setColor(backgroundColor);
 
-    if (!isStart && !isEnd) {
-      g.fillRect(r.x + 2, r.y, width, height);
-    }
-    else {
-      g.fillRoundRect(r.x + 2, r.y, width, height, curvature, curvature);
-
-      final int diff = height / 2;
-
-      if (!isStart) {
-        g.fillRect(r.x + 2, r.y, width, diff);
-      }
-
-      if (!isEnd) {
-        g.fillRect(r.x + 2, r.y + diff, width, height - diff);
-      }
-    }
+    g.fillRect(r.x + 2, r.y, width, height);
     g.setColor(JBColor.white);
     g.drawString(text, r.x + 4, r.y + r.height - 4);
-  }
-}
-
-class UncoveredLineMarkerRenderer extends FlutterLineMarkerRenderer {
-  private static final Color uncoveredColor = JBColor.LIGHT_GRAY;
-
-  UncoveredLineMarkerRenderer() {
-  }
-
-  @Override
-  public void paint(Editor editor, Graphics g, Rectangle r) {
-    final int width = r.width - 4;
-    final int height = r.height / 2;
-
-    g.setColor(uncoveredColor);
-    g.fillRoundRect(r.x + 2, r.y + (r.height - height) / 2, width, height, curvature, curvature);
   }
 }
 

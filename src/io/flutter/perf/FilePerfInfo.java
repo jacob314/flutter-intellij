@@ -7,13 +7,41 @@ package io.flutter.perf;
 
 import com.intellij.openapi.util.Pair;
 import com.intellij.openapi.vfs.VirtualFile;
-import gnu.trove.TIntHashSet;
+import gnu.trove.*;
+
+import java.util.List;
+import java.util.PriorityQueue;
+
+class SlidingWindowstats {
+  static final int MAX_TIME_WINDOW = 10000;
+
+  PriorityQueue<Long> timeStamps = new PriorityQueue<Long>();
+  
+  void addCount(long timestamp) {
+    timeStamps.add(timestamp);
+    removeOlderThan(timestamp - MAX_TIME_WINDOW);
+  }
+
+  int getCount(long minTimestamp) {
+    removeOlderThan(minTimestamp);
+    return timeStamps.size();
+  }
+  
+  void removeOlderThan(long minTimestamp) {
+    while(true) {
+      Long candidate = timeStamps.peek();
+      if (candidate == null || candidate >= minTimestamp) {
+        return; 
+      }
+      timeStamps.remove();
+    }
+  }
+}
 
 class FilePerfInfo {
   private final VirtualFile file;
 
-  private final TIntHashSet coveredLines = new TIntHashSet();
-  private final TIntHashSet uncoveredLines = new TIntHashSet();
+  private final TIntObjectHashMap<SlidingWindowstats> lineCounts = new TIntObjectHashMap<>();
 
   public FilePerfInfo(VirtualFile file) {
     this.file = file;
@@ -23,43 +51,42 @@ class FilePerfInfo {
     return file;
   }
 
-  // XXX THESE ARE THE WRONG STATS.
-  public void addCovered(Pair<Integer, Integer> pos) {
-    if (pos == null) {
-      return;
+  public void addCounts(int line, TLongArrayList timestamps) {
+    SlidingWindowstats stats = lineCounts.get(line);
+    if (stats == null) {
+      stats = new SlidingWindowstats();
+      lineCounts.put(line, stats);
     }
-
-    final int line = pos.first;
-    coveredLines.add(line);
-    uncoveredLines.remove(line);
-  }
-
-  public void addUncovered(int line) {
-    if (!coveredLines.contains(line)) {
-      uncoveredLines.add(line);
+    for (int i = 0; i < timestamps.size(); ++i) {
+      stats.addCount(timestamps.get(i));
     }
   }
 
-  public void addUncovered(Pair<Integer, Integer> pos) {
-    if (pos == null) {
-      return;
+  interface LineCountCallback {
+    void execute(int line, int count);
+  }
+  /**
+   * Executes callback for each line that
+   * @param timestamp
+   * @param callback
+   */
+  public void getCounts(long timestamp, LineCountCallback callback) {
+    lineCounts.retainEntries((int line, SlidingWindowstats stats) -> {
+      final int count = stats.getCount(0); // XXX timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
+      if (count > 0) {
+        callback.execute(line, count);
+        return true;
+      }
+      return false;
+    });
+  }
+
+  /*
+  public int getCount(int line, long timestamp) {
+    final SlidingWindowstats stats = lineCounts.get(line);
+    if (stats == null) {
+      return 0;
     }
-    final int line = pos.first;
-    if (!coveredLines.contains(line)) {
-      uncoveredLines.add(line);
-    }
-  }
-
-  public int[] getCoveredLines() {
-    return coveredLines.toArray();
-  }
-
-  public int[] getUncoveredLines() {
-    return uncoveredLines.toArray();
-  }
-
-  @SuppressWarnings("BooleanMethodIsAlwaysInverted")
-  public boolean isCovered(int line) {
-    return coveredLines.contains(line);
-  }
+    return stats.getCount(timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
+  }*/
 }

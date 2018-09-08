@@ -19,6 +19,7 @@ import com.intellij.util.messages.MessageBusConnection;
 import io.flutter.FlutterUtils;
 import io.flutter.run.FlutterAppManager;
 import io.flutter.run.daemon.FlutterApp;
+import io.flutter.view.FlutterViewMessages;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -34,6 +35,9 @@ import org.jetbrains.annotations.Nullable;
  */
 public class FlutterWidgetPerfManager implements Disposable {
   public static final boolean ENABLE_REBUILD_COUNTS = true;
+
+  private static final String TRACK_REBUILD_DIRTY_WIDGETS = "ext.flutter.inspector.trackRebuildDirtyWidgets";
+  private FlutterApp app;
 
   /**
    * Initialize the rebuild count manager for the given project.
@@ -52,10 +56,18 @@ public class FlutterWidgetPerfManager implements Disposable {
   private FileEditor lastEditor;
 
   private FlutterWidgetPerfManager(@NotNull Project project) {
+    if (!ENABLE_REBUILD_COUNTS) {
+      return;
+    }
+
     Disposer.register(project, this);
 
     FlutterAppManager.getInstance(project).getActiveAppAsStream().listen(
       this::updateCurrentAppChanged, true);
+
+    project.getMessageBus().connect().subscribe(
+      FlutterViewMessages.FLUTTER_DEBUG_TOPIC, (event) -> debugActive(project, event)
+    );
 
     final MessageBusConnection connection = project.getMessageBus().connect(project);
 
@@ -88,6 +100,17 @@ public class FlutterWidgetPerfManager implements Disposable {
     });
   }
 
+  private void debugActive(Project project, FlutterViewMessages.FlutterDebugEvent event) {
+    app.hasServiceExtension(TRACK_REBUILD_DIRTY_WIDGETS, (enabled) -> {
+      if (enabled && currentStats == null) {
+        app.callBooleanExtension(TRACK_REBUILD_DIRTY_WIDGETS, true);
+        currentStats = new FlutterWidgetPerf(app);
+        notifyPerf();
+      }
+    });
+
+  }
+
   private boolean couldContainWidgets(@Nullable VirtualFile file) {
     return file != null && FlutterUtils.isDartFile(file);
   }
@@ -100,25 +123,24 @@ public class FlutterWidgetPerfManager implements Disposable {
   }
 
   private void updateCurrentAppChanged(@Nullable FlutterApp app) {
+    if (!ENABLE_REBUILD_COUNTS) {
+      return;
+    }
+    this.app = app;
+
     if (app == null) {
       if (currentStats != null) {
         currentStats.dispose();
         currentStats = null;
       }
+      return;
     }
-    else if (currentStats == null) {
-      if (ENABLE_REBUILD_COUNTS && app.getLaunchMode().supportsDebugConnection()) {
-        currentStats = new FlutterWidgetPerf(app);
-        notifyPerf();
+    if (currentStats != null) {
+      if (currentStats.getApp() == app) {
+        return;
       }
-    }
-    else if (currentStats.getApp() != app) {
       currentStats.dispose();
-
-      if (ENABLE_REBUILD_COUNTS && app.getLaunchMode().supportsDebugConnection()) {
-        currentStats = new FlutterWidgetPerf(app);
-        notifyPerf();
-      }
+      currentStats = null;
     }
   }
 
