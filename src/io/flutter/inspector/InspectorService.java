@@ -1080,13 +1080,17 @@ public class InspectorService implements Disposable {
     }
 
     public CompletableFuture<InstanceRef> findMatchingElementsForSourceLocation(String path, int startLine, int startColumn, int endLine, int endColumn) {
-      path = "file://" + path;
+      path = toSourceLocationUri(path);
       if (!supportedServiceMethods.contains("findMatchingElementsForSourceLocation")) {
         return CompletableFuture.completedFuture(null);
       }
       return invokeServiceMethodObservatory("findMatchingElementsForSourceLocation", path, startLine + 1, startColumn + 1,
                                             endLine + 1, endColumn + 1);
     }
+  }
+
+  public static String toSourceLocationUri(String path) {
+    return "file://" + path;
   }
 
   public enum FlutterTreeType {

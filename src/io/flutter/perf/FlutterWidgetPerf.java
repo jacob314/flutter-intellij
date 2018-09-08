@@ -10,8 +10,10 @@ import com.google.gson.JsonObject;
 import com.intellij.concurrency.JobScheduler;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.ui.EdtInvocationManager;
+import io.flutter.inspector.InspectorService;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.StreamSubscription;
 import io.flutter.utils.VmServiceListenerAdapter;
@@ -27,7 +29,10 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static io.flutter.inspector.InspectorService.toSourceLocationUri;
+
 class FlutterWidgetPerf implements Disposable {
+  private static final long REQUEST_TIMEOUT_TIME = 2000;
   @NotNull final FlutterApp app;
   @NotNull final FlutterApp.FlutterAppListener appListener;
   private StreamSubscription<IsolateRef> isolateRefStreamSubscription;
@@ -36,8 +41,8 @@ class FlutterWidgetPerf implements Disposable {
   private boolean isDirty = true;
   private boolean isDisposed = false;
   private boolean requestInProgress = false;
+  private long lastRequestTime;
 
-  private ScriptManager scriptManager;
   @SuppressWarnings("FieldCanBeLocal")
   private VmServiceListener vmServiceListener;
 
@@ -45,6 +50,7 @@ class FlutterWidgetPerf implements Disposable {
 
   @Nullable VirtualFile currentFile;
   @Nullable FileEditor currentEditor;
+  private boolean connected;
 
   FlutterWidgetPerf(@NotNull FlutterApp app) {
     this.app = app;
@@ -94,7 +100,7 @@ class FlutterWidgetPerf implements Disposable {
   }
 
   private boolean isConnected() {
-    return scriptManager != null;
+    return connected;
   }
 
   private IsolateRef getCurrentIsolateRef() {
@@ -107,59 +113,68 @@ class FlutterWidgetPerf implements Disposable {
       return;
     }
 
-    if (scriptManager != null) {
+    if (connected) {
       return;
     }
 
-    scriptManager = new ScriptManager(vmService);
+    connected = true;
 
-    assert app.getPerfService() != null;
-    isolateRefStreamSubscription = app.getPerfService().getCurrentFlutterIsolate(
+    requestInProgress =  false;
+    final PerfService perfService = app.getPerfService();
+    assert perfService != null;
+    isolateRefStreamSubscription = perfService.getCurrentFlutterIsolate(
       (isolateRef) -> requestRepaint(When.soon), false);
 
-    vmServiceListener = new VmServiceListenerAdapter() {
+    vmService.addVmServiceListener(new VmServiceListenerAdapter() {
       @Override
       public void received(String streamId, Event event) {
-        if (isDisposed) {
-          return;
-        }
-
-        final EventKind kind = event.getKind();
-
-        if (kind == EventKind.PauseBreakpoint || kind == EventKind.PauseException ||
-            kind == EventKind.PauseInterrupted) {
-          requestRepaint(When.soon);
-        }
+        onVmServiceReceived(streamId, event);
       }
-    };
-    vmService.addVmServiceListener(vmServiceListener);
+
+      @Override
+      public void connectionClosed() {
+      }
+    });
 
     requestRepaint(When.soon);
   }
 
-  /**
-   * Schedule a repaint of the coverage information.
-   * <p>
-   * When.now schedules a repaint immediately.
-   * <p>
-   * When.soon will schedule a repaint shortly; that can get delayed by another request, with a maximum delay.
-   */
+  private void onVmServiceReceived(String streamId, Event event) {
+    // TODO(jacobr): centrailize checks for Flutter.Frame
+    // They are now in PerfService, InspectorService, and here.
+    if (StringUtil.equals(streamId, VmService.EXTENSION_STREAM_ID)) {
+      if (StringUtil.equals("Flutter.Frame", event.getExtensionKind())) {
+        requestRepaint(When.soon);
+      }
+    }
+  }
+
+    /**
+     * Schedule a repaint of the coverage information.
+     * <p>
+     * When.now schedules a repaint immediately.
+     * <p>
+     * When.soon will schedule a repaint shortly; that can get delayed by another request, with a maximum delay.
+     */
   private void requestRepaint(When when) {
     isDirty = true;
-
-    if (requestInProgress) {
-      return;
-    }
 
     if (!isConnected() || this.currentFile == null || this.currentEditor == null) {
       return;
     }
 
+    long currentTime = System.currentTimeMillis();
+    if (requestInProgress && (currentTime - lastRequestTime) < REQUEST_TIMEOUT_TIME ) {
+      return;
+    }
+
     requestInProgress = true;
+    lastRequestTime = System.currentTimeMillis();
 
     final FileEditor editor = this.currentEditor;
     final VirtualFile file = this.currentFile;
 
+    // TODO(jacobr): schedule based on repaints like WidgetInspector instead of with a 1 sec delay.
     JobScheduler.getScheduler().schedule(() -> performRequest(editor, file), 0, TimeUnit.SECONDS);
   }
 
@@ -179,37 +194,18 @@ class FlutterWidgetPerf implements Disposable {
 
     this.isDirty = false;
 
-    scriptManager.setCurrentIsolate(isolateRef);
-
-    @Nullable final ScriptRef scriptRef = scriptManager.getScriptRefFor(file);
-    if (scriptRef == null) {
-      performRequestFinish();
-      return;
-    }
-
     final JsonObject params = new JsonObject();
-    final JsonArray arr = new JsonArray();
-    arr.add("Coverage");
+    params.addProperty("file", toSourceLocationUri(file.getPath()));
+    params.addProperty("minTimestamp", System.currentTimeMillis() - SlidingWindowstats.MAX_TIME_WINDOW);
 
-    params.add("reports", arr);
 
-    // Pass in just the current scriptId.
-    params.addProperty("scriptId", scriptRef.getId());
-
-    // Make sure we get good 'not covered' info.
-    // TODO(devoncarew): Does this work under the CFE?
-    params.addProperty("forceCompile", true);
-
-    // TODO(devoncarew): When the latest verison of the library is available, use the getSourceReport() call directly.
-    vmService.callServiceExtension(isolateRef.getId(), "getSourceReport", params, new ServiceExtensionConsumer() {
+    vmService.callServiceExtension(isolateRef.getId(), "ext.flutter.inspector.getPerfSourceReport", params, new ServiceExtensionConsumer() {
       @Override
       public void received(JsonObject object) {
         JobScheduler.getScheduler().schedule(() -> {
-          final SourceReport report = new SourceReport(object);
+          final PerfSourceReport report = new PerfSourceReport(object);
           final EditorPerfDecorations editorDecoration = editorDecorations.get(fileEditor);
-
-          editorDecoration.updateFromSourceReport(scriptManager, file, report);
-
+          editorDecoration.updateFromPerfSourceReport(file, report);
           performRequestFinish();
         }, 0, TimeUnit.MILLISECONDS);
       }
@@ -269,7 +265,7 @@ class FlutterWidgetPerf implements Disposable {
 
     app.removeStateListener(appListener);
 
-    scriptManager = null;
+    connected = false;
 
     // TODO(devoncarew): This method will be available in a future version of the service protocol library.
     //if (vmServiceListener != null) {

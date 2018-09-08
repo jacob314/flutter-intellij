@@ -44,6 +44,7 @@ public class FlutterAppManager implements Disposable {
 
     Disposer.register(project, this);
 
+    // TODO(jacobr): why do we have a 1 second delay?
     task = JobScheduler.getScheduler().scheduleWithFixedDelay(
       this::updateActiveApp, 1, 1, TimeUnit.SECONDS);
   }
