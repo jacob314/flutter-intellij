@@ -9,11 +9,12 @@ import com.intellij.openapi.util.Pair;
 import com.intellij.openapi.vfs.VirtualFile;
 import gnu.trove.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.PriorityQueue;
 
 class SlidingWindowstats {
-  static final int MAX_TIME_WINDOW = 10000;
+  static final int MAX_TIME_WINDOW = 1000;
 
   PriorityQueue<Long> timeStamps = new PriorityQueue<Long>();
   
@@ -62,31 +63,24 @@ class FilePerfInfo {
     }
   }
 
-  interface LineCountCallback {
-    void execute(int line, int count);
-  }
-  /**
-   * Executes callback for each line that
-   * @param timestamp
-   * @param callback
-   */
-  public void getCounts(long timestamp, LineCountCallback callback) {
+  public List<Integer> getLines(long timestamp) {
+    final List<Integer> lines = new ArrayList<>();
     lineCounts.retainEntries((int line, SlidingWindowstats stats) -> {
       final int count = stats.getCount(0); // XXX timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
       if (count > 0) {
-        callback.execute(line, count);
+        lines.add(line);
         return true;
       }
       return false;
     });
+    return lines;
   }
 
-  /*
   public int getCount(int line, long timestamp) {
     final SlidingWindowstats stats = lineCounts.get(line);
     if (stats == null) {
       return 0;
     }
     return stats.getCount(timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
-  }*/
+  }
 }

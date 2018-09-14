@@ -5,7 +5,6 @@
  */
 package io.flutter.perf;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.intellij.concurrency.JobScheduler;
 import com.intellij.openapi.Disposable;
@@ -13,7 +12,6 @@ import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.ui.EdtInvocationManager;
-import io.flutter.inspector.InspectorService;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.StreamSubscription;
 import io.flutter.utils.VmServiceListenerAdapter;
@@ -32,7 +30,7 @@ import java.util.concurrent.TimeUnit;
 import static io.flutter.inspector.InspectorService.toSourceLocationUri;
 
 class FlutterWidgetPerf implements Disposable {
-  private static final long REQUEST_TIMEOUT_TIME = 2000;
+  private static final long REQUEST_TIMEOUT_INTERVAL = 2000;
   @NotNull final FlutterApp app;
   @NotNull final FlutterApp.FlutterAppListener appListener;
   private StreamSubscription<IsolateRef> isolateRefStreamSubscription;
@@ -139,11 +137,22 @@ class FlutterWidgetPerf implements Disposable {
     requestRepaint(When.soon);
   }
 
+  private static volatile long timeSkew = 0;
+
+  public static long getTimeSkew() {
+    return timeSkew;
+  }
+
   private void onVmServiceReceived(String streamId, Event event) {
     // TODO(jacobr): centrailize checks for Flutter.Frame
     // They are now in PerfService, InspectorService, and here.
     if (StringUtil.equals(streamId, VmService.EXTENSION_STREAM_ID)) {
       if (StringUtil.equals("Flutter.Frame", event.getExtensionKind())) {
+        // Skew between local system time and time reported
+        final JsonObject extensionData = event.getExtensionData().getJson();
+        long deviceTimeMicroseconds = extensionData.getAsJsonPrimitive("startTime").getAsLong();
+        // The device's time doesn't neccessarily match local time.
+        timeSkew = System.currentTimeMillis() - (deviceTimeMicroseconds / 1000);
         requestRepaint(When.soon);
       }
     }
@@ -164,12 +173,12 @@ class FlutterWidgetPerf implements Disposable {
     }
 
     long currentTime = System.currentTimeMillis();
-    if (requestInProgress && (currentTime - lastRequestTime) < REQUEST_TIMEOUT_TIME ) {
+    if (requestInProgress && (currentTime - lastRequestTime) < REQUEST_TIMEOUT_INTERVAL) {
       return;
     }
 
     requestInProgress = true;
-    lastRequestTime = System.currentTimeMillis();
+    lastRequestTime = currentTime;
 
     final FileEditor editor = this.currentEditor;
     final VirtualFile file = this.currentFile;
@@ -196,8 +205,7 @@ class FlutterWidgetPerf implements Disposable {
 
     final JsonObject params = new JsonObject();
     params.addProperty("file", toSourceLocationUri(file.getPath()));
-    params.addProperty("minTimestamp", System.currentTimeMillis() - SlidingWindowstats.MAX_TIME_WINDOW);
-
+// XXX    params.addProperty("minTimestamp", System.currentTimeMillis() - SlidingWindowstats.MAX_TIME_WINDOW);
 
     vmService.callServiceExtension(isolateRef.getId(), "ext.flutter.inspector.getPerfSourceReport", params, new ServiceExtensionConsumer() {
       @Override

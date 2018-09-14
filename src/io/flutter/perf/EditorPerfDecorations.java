@@ -8,6 +8,8 @@ package io.flutter.perf;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.ex.MarkupModelEx;
+import com.intellij.openapi.editor.ex.RangeHighlighterEx;
 import com.intellij.openapi.editor.markup.*;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.TextEditor;
@@ -18,10 +20,15 @@ import com.intellij.util.ui.GraphicsUtil;
 import com.intellij.util.ui.UIUtil;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ActionEvent;
 import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
+
+import static io.flutter.perf.SlidingWindowstats.MAX_TIME_WINDOW;
 
 class EditorPerfDecorations implements Disposable {
   private static final VirtualFileManager virtualFileManager = VirtualFileManager.getInstance();
@@ -30,13 +37,25 @@ class EditorPerfDecorations implements Disposable {
 
   @NotNull
   private final FileEditor fileEditor;
+  private final Timer timer;
 
   private boolean hasDecorations = false;
 
+  void setHasDecorations(boolean value) {
+    if (value != hasDecorations) {
+      hasDecorations = value;
+      if (value) {
+        timer.start();
+      } else {
+        timer.stop();
+      }
+    }
+  }
   EditorPerfDecorations(@NotNull FileEditor fileEditor) {
     this.fileEditor = fileEditor;
 
     addBlankMarker();
+    timer = new Timer(1000 / 60, this::onFrame);
   }
 
   private void addBlankMarker() {
@@ -53,7 +72,7 @@ class EditorPerfDecorations implements Disposable {
           markupModel.addLineHighlighter(0, HIGHLIGHTER_LAYER, new TextAttributes());
         rangeHighlighter.setLineMarkerRenderer(new BlankLineMarkerRenderer());
 
-        hasDecorations = true;
+        setHasDecorations(true);
       }
     });
   }
@@ -78,20 +97,41 @@ class EditorPerfDecorations implements Disposable {
 
       removeHighlightersFromEditor(markupModel);
 
-      final long timestamp = System.currentTimeMillis();
-      perfInfo.getCounts(timestamp, (int line, int count) -> {
+      final long timestamp = System.currentTimeMillis() - FlutterWidgetPerf.getTimeSkew();
+      for (int line : perfInfo.getLines(timestamp - MAX_TIME_WINDOW)) {
         final RangeHighlighter rangeHighlighter = markupModel.addLineHighlighter(line - 1, HIGHLIGHTER_LAYER, rebuiltAttributes);
 
         final CountLineMarkerRenderer renderer =
-          new CountLineMarkerRenderer(count);
+          new CountLineMarkerRenderer(
+            () -> perfInfo.getCount(line, System.currentTimeMillis() - FlutterWidgetPerf.getTimeSkew() - MAX_TIME_WINDOW));
         // TODO(jacobr): consider removing these 3 lines?
         rangeHighlighter.setErrorStripeMarkColor(CountLineMarkerRenderer.coveredColor);
         rangeHighlighter.setThinErrorStripeMark(true);
         rangeHighlighter.setLineMarkerRenderer(renderer);
-      });
+      }
 
-      hasDecorations = true;
+      setHasDecorations(true);
     });
+  }
+
+  private void onFrame(ActionEvent event) {
+    if (!hasDecorations) {
+      timer.stop();;
+      return;
+    }
+
+    assert fileEditor instanceof TextEditor;
+    final Editor editor = ((TextEditor)fileEditor).getEditor();
+    final MarkupModel markupModel = editor.getMarkupModel();
+
+    if (markupModel instanceof MarkupModelEx) {
+      for (RangeHighlighter highlighter : markupModel.getAllHighlighters()) {
+        if (highlighter.getLineMarkerRenderer() instanceof FlutterLineMarkerRenderer) {
+          ((MarkupModelEx)markupModel).fireAttributesChanged((RangeHighlighterEx)highlighter, true, true);
+        }
+      }
+    }
+    // TODO(jacobr): STOP ANIMATING WHEN ALL MODELS ARE DONE....
   }
 
   private void removeHighlightersFromEditor(MarkupModel markupModel) {
@@ -107,12 +147,12 @@ class EditorPerfDecorations implements Disposable {
       markupModel.removeHighlighter(highlighter);
     }
 
-    hasDecorations = false;
+    setHasDecorations(false);
   }
 
   public void flushDecorations() {
     if (hasDecorations && fileEditor.isValid()) {
-      hasDecorations = false;
+      setHasDecorations(false);
 
       ApplicationManager.getApplication().invokeLater(() -> {
         final MarkupModel markupModel = ((TextEditor)fileEditor).getEditor().getMarkupModel();
@@ -140,10 +180,14 @@ abstract class FlutterLineMarkerRenderer implements LineMarkerRenderer, LineMark
 class CountLineMarkerRenderer extends FlutterLineMarkerRenderer {
   static final Color coveredColor = new JBColor(new Color(0x0091ea), new Color(0x0091ea));
 
-  private final int count;
+  private final Supplier<Integer> countSupplier;
 
-  CountLineMarkerRenderer(int count) {
-    this.count = count;
+  CountLineMarkerRenderer(Supplier<Integer> countSupplier) {
+    this.countSupplier = countSupplier;
+  }
+
+  public int getCount() {
+    return countSupplier.get();
   }
 
   @Override
@@ -155,7 +199,7 @@ class CountLineMarkerRenderer extends FlutterLineMarkerRenderer {
     final Font font = UIUtil.getFont(UIUtil.FontSize.MINI, UIUtil.getButtonFont());
     g.setFont(font);
 
-    final String text = Integer.toString(count);
+    final String text = countSupplier.get().toString();
 
     final Rectangle2D bounds = g.getFontMetrics().getStringBounds(text, g);
 
