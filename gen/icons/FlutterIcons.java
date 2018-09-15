@@ -75,4 +75,29 @@ public class FlutterIcons {
   public static final Icon Up = load("/icons/preview/up.png");
   public static final Icon Down = load("/icons/preview/down.png");
   public static final Icon ExtractMethod = load("/icons/preview/extract_method.png");
+
+
+  public static class State {
+    public static final Icon RedProgr = load("/icons/perf/RedProgr.png"); // 16x16
+    public static final Icon RedProgr_1 = load("/icons/perf/RedProgr_1.png"); // 16x16
+    public static final Icon RedProgr_2 = load("/icons/perf/RedProgr_2.png"); // 16x16
+    public static final Icon RedProgr_3 = load("/icons/perf/RedProgr_3.png"); // 16x16
+    public static final Icon RedProgr_4 = load("/icons/perf/RedProgr_4.png"); // 16x16
+    public static final Icon RedProgr_5 = load("/icons/perf/RedProgr_5.png"); // 16x16
+    public static final Icon RedProgr_6 = load("/icons/perf/RedProgr_6.png"); // 16x16
+    public static final Icon RedProgr_7 = load("/icons/perf/RedProgr_7.png"); // 16x16
+    public static final Icon RedProgr_8 = load("/icons/perf/RedProgr_8.png"); // 16x16
+
+    /*
+    public static final Icon RedProgr_2X = load("/icons/perf/RedProgr@2x.png"); // 16x16
+    public static final Icon RedProgr_1_2X = load("/icons/perf/RedProgr_1@2x.png"); // 16x16
+    public static final Icon RedProgr_2_2X = load("/icons/perf/RedProgr_2.png"); // 16x16
+    public static final Icon RedProgr_3_2X = load("/icons/perf/RedProgr_3.png"); // 16x16
+    public static final Icon RedProgr_4_2X = load("/icons/perf/RedProgr_4.png"); // 16x16
+    public static final Icon RedProgr_5_2X = load("/icons/perf/RedProgr_5.png"); // 16x16
+    public static final Icon RedProgr_6_2X = load("/icons/perf/RedProgr_6.png"); // 16x16
+    public static final Icon RedProgr_7_2X = load("/icons/perf/RedProgr_7.png"); // 16x16
+    public static final Icon RedProgr_8_2X = load("/icons/perf/RedProgr_8.png"); // 16x16
+*/
+  }
 }
