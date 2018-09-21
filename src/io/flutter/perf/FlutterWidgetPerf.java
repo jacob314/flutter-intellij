@@ -9,6 +9,7 @@ import com.google.gson.JsonObject;
 import com.intellij.concurrency.JobScheduler;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.ui.EdtInvocationManager;
@@ -21,15 +22,14 @@ import org.dartlang.vm.service.consumer.ServiceExtensionConsumer;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import sun.jvm.hotspot.ui.Editor;
 
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import static io.flutter.inspector.InspectorService.toSourceLocationUri;
 
-class FlutterWidgetPerf implements Disposable {
+public class FlutterWidgetPerf implements Disposable {
   private static final long REQUEST_TIMEOUT_INTERVAL = 2000;
   @NotNull final FlutterApp app;
   @NotNull final FlutterApp.FlutterAppListener appListener;
@@ -49,6 +49,8 @@ class FlutterWidgetPerf implements Disposable {
   @Nullable VirtualFile currentFile;
   @Nullable FileEditor currentEditor;
   private boolean connected;
+
+  private long timeLastRequest = -1;
 
   FlutterWidgetPerf(@NotNull FlutterApp app) {
     this.app = app;
@@ -167,6 +169,7 @@ class FlutterWidgetPerf implements Disposable {
      */
   private void requestRepaint(When when) {
     isDirty = true;
+    timeLastRequest = System.currentTimeMillis();
 
     if (!isConnected() || this.currentFile == null || this.currentEditor == null) {
       return;
@@ -183,7 +186,6 @@ class FlutterWidgetPerf implements Disposable {
     final FileEditor editor = this.currentEditor;
     final VirtualFile file = this.currentFile;
 
-    // TODO(jacobr): schedule based on repaints like WidgetInspector instead of with a 1 sec delay.
     JobScheduler.getScheduler().schedule(() -> performRequest(editor, file), 0, TimeUnit.SECONDS);
   }
 
@@ -205,31 +207,48 @@ class FlutterWidgetPerf implements Disposable {
 
     final JsonObject params = new JsonObject();
     params.addProperty("file", toSourceLocationUri(file.getPath()));
-// XXX    params.addProperty("minTimestamp", System.currentTimeMillis() - SlidingWindowstats.MAX_TIME_WINDOW);
 
     vmService.callServiceExtension(isolateRef.getId(), "ext.flutter.inspector.getPerfSourceReport", params, new ServiceExtensionConsumer() {
       @Override
       public void received(JsonObject object) {
         JobScheduler.getScheduler().schedule(() -> {
-          final PerfSourceReport report = new PerfSourceReport(object);
+          final List<PerfSourceReport> reports = new ArrayList<>();
+          for (PerfReportKind kind : PerfReportKind.values()) {
+            if (object.has(kind.name)) {
+              reports.add(new PerfSourceReport(object.getAsJsonObject(kind.name), kind));
+            }
+          }
           final EditorPerfDecorations editorDecoration = editorDecorations.get(fileEditor);
-          editorDecoration.updateFromPerfSourceReport(file, report);
-          performRequestFinish();
+          editorDecoration.updateFromPerfSourceReports(file, reports);
+          performRequestFinish(fileEditor, file);
         }, 0, TimeUnit.MILLISECONDS);
       }
 
       @Override
       public void onError(RPCError error) {
-        performRequestFinish();
+        performRequestFinish(fileEditor, file);
       }
     });
   }
 
-  private void performRequestFinish() {
+  private void performRequestFinish(FileEditor fileEditor, VirtualFile file) {
     requestInProgress = false;
+    timeLastRequest = System.currentTimeMillis();
+
+    JobScheduler.getScheduler().schedule(() -> maybeNotifyIdle(fileEditor, file), 1, TimeUnit.SECONDS);
 
     if (isDirty) {
       requestRepaint(When.soon);
+    }
+  }
+
+  private void maybeNotifyIdle(FileEditor editor, VirtualFile file) {
+    if (System.currentTimeMillis() >= lastRequestTime + 1000) {
+      System.out.println("XXX is idle!");
+      final FilePerfModel editorDecoration = editorDecorations.get(editor);
+      if (editorDecoration != null) {
+        editorDecoration.markAppIdle();
+      }
     }
   }
 
@@ -242,8 +261,8 @@ class FlutterWidgetPerf implements Disposable {
 
     if (fileEditor != null) {
       // Create a new EditorPerfDecorations if necessary.
-      if (!editorDecorations.containsKey(fileEditor)) {
-        editorDecorations.put(fileEditor, new EditorPerfDecorations(fileEditor));
+      if (!editorDecorations.containsKey(fileEditor) && fileEditor instanceof TextEditor) {
+        editorDecorations.put(fileEditor, new EditorPerfDecorations((TextEditor)fileEditor, app));
       }
 
       requestRepaint(When.now);
@@ -286,6 +305,12 @@ class FlutterWidgetPerf implements Disposable {
 
     if (isolateRefStreamSubscription != null) {
       isolateRefStreamSubscription.dispose();
+    }
+  }
+
+  public void clear() {
+    for (EditorPerfDecorations decoration : editorDecorations.values()) {
+      decoration.clear();
     }
   }
 

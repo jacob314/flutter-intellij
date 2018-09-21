@@ -34,10 +34,47 @@ import org.jetbrains.annotations.Nullable;
  * performance of an application and avoid common pitfalls.
  */
 public class FlutterWidgetPerfManager implements Disposable {
-  public static final boolean ENABLE_REBUILD_COUNTS = true;
+  // XXX cleanup this name.
+  public static final String TRACK_REBUILD_WIDGETS = "ext.flutter.inspector.trackRebuildDirtyWidgets";
+  public static final String TRACK_REPAINT_WIDGETS = "ext.flutter.inspector.trackRepaintWidgets";
 
-  private static final String TRACK_REBUILD_DIRTY_WIDGETS = "ext.flutter.inspector.trackRebuildDirtyWidgets";
+  private static final boolean ENABLE_WIDGET_PERF_MANAGER = true;
   private FlutterApp app;
+
+  public static boolean trackRebuildWidgetsDefault = false;
+  public static boolean trackRepaintWidgetsDefault = false;
+
+  private boolean trackRebuildWidgets = trackRebuildWidgetsDefault;
+  private boolean trackRepaintWidgets = trackRepaintWidgetsDefault;
+  private boolean debugIsActive = false;
+
+  public boolean isTrackRebuildWidgets() {
+    return trackRebuildWidgets;
+  }
+
+  public boolean isTrackRepaintWidgets() {
+    return trackRepaintWidgets;
+  }
+
+  public void setTrackRebuildWidgets(boolean value) {
+    if (value == trackRebuildWidgets) {
+      return;
+    }
+    trackRebuildWidgets = value;
+    if (debugIsActive && app != null && app.isSessionActive()) {
+      updateTrackWidgetRebuilds();
+    }
+  }
+
+  public void setTrackRepaintWidgets(boolean value) {
+    if (value == trackRepaintWidgets) {
+      return;
+    }
+    trackRepaintWidgets = value;
+    if (debugIsActive && app != null && app.isSessionActive()) {
+      updateTrackWidgetRepaints();
+    }
+  }
 
   /**
    * Initialize the rebuild count manager for the given project.
@@ -51,12 +88,12 @@ public class FlutterWidgetPerfManager implements Disposable {
     return ServiceManager.getService(project, FlutterWidgetPerfManager.class);
   }
 
-  private FlutterWidgetPerf currentStats;
+  FlutterWidgetPerf currentStats;
   private VirtualFile lastFile;
   private FileEditor lastEditor;
 
   private FlutterWidgetPerfManager(@NotNull Project project) {
-    if (!ENABLE_REBUILD_COUNTS) {
+    if (!ENABLE_WIDGET_PERF_MANAGER) {
       return;
     }
 
@@ -101,14 +138,46 @@ public class FlutterWidgetPerfManager implements Disposable {
   }
 
   private void debugActive(Project project, FlutterViewMessages.FlutterDebugEvent event) {
-    app.hasServiceExtension(TRACK_REBUILD_DIRTY_WIDGETS, (enabled) -> {
-      if (enabled && currentStats == null) {
-        app.callBooleanExtension(TRACK_REBUILD_DIRTY_WIDGETS, true);
-        currentStats = new FlutterWidgetPerf(app);
+    if (currentStats == null) {
+      currentStats = new FlutterWidgetPerf(app);
+      updateTrackWidgetRebuilds();
+      updateTrackWidgetRepaints();
+    }
+    debugIsActive = true;
+    app.addStateListener(new FlutterApp.FlutterAppListener() {
+      public void stateChanged(FlutterApp.State newState) {
+        if (newState == FlutterApp.State.RELOADING ||
+            newState == FlutterApp.State.RESTARTING) {
+          currentStats.clear();
+        }
+      }
+
+      public void notifyAppRestarted() {
+        currentStats.clear();
+      }
+
+      public void notifyAppReloaded() {
+        currentStats.clear();
+      }
+    });
+  }
+
+  private void updateTrackWidgetRebuilds() {
+    app.hasServiceExtension(TRACK_REBUILD_WIDGETS, (enabled) -> {
+      if (enabled) {
+        app.callBooleanExtension(TRACK_REBUILD_WIDGETS, trackRebuildWidgets);
         notifyPerf();
       }
     });
+  }
 
+  private void updateTrackWidgetRepaints() {
+    app.hasServiceExtension(TRACK_REPAINT_WIDGETS, (enabled) -> {
+      if (enabled) {
+        app.callBooleanExtension(TRACK_REPAINT_WIDGETS, trackRepaintWidgets);
+        notifyPerf();
+      }
+    });
   }
 
   private boolean couldContainWidgets(@Nullable VirtualFile file) {
@@ -123,7 +192,7 @@ public class FlutterWidgetPerfManager implements Disposable {
   }
 
   private void updateCurrentAppChanged(@Nullable FlutterApp app) {
-    if (!ENABLE_REBUILD_COUNTS) {
+    if (!ENABLE_WIDGET_PERF_MANAGER) {
       return;
     }
     this.app = app;

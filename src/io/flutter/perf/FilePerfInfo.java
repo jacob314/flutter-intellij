@@ -5,82 +5,97 @@
  */
 package io.flutter.perf;
 
-import com.intellij.openapi.util.Pair;
+import com.google.common.collect.LinkedListMultimap;
+import com.google.common.collect.Multimap;
+import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
 import gnu.trove.*;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.PriorityQueue;
+import java.util.Collection;
 
-class SlidingWindowstats {
-  static final int MAX_TIME_WINDOW = 1000;
+class SlidingWindowStats {
 
-  PriorityQueue<Long> timeStamps = new PriorityQueue<Long>();
-  
-  void addCount(long timestamp) {
-    timeStamps.add(timestamp);
-    removeOlderThan(timestamp - MAX_TIME_WINDOW);
+  SlidingWindowStats(PerfReportKind kind, int total, int pastSecond, String description) {
+    this.kind = kind;
+    this.total = total;
+    this.pastSecond = pastSecond;
+    this.description = description;
   }
 
-  int getCount(long minTimestamp) {
-    removeOlderThan(minTimestamp);
-    return timeStamps.size();
+  private final PerfReportKind kind;
+  private final int total;
+  private int pastSecond = 0;
+  private final String description;
+
+  PerfReportKind getKind() { return kind; }
+  int getTotal() {
+    return total;
   }
-  
-  void removeOlderThan(long minTimestamp) {
-    while(true) {
-      Long candidate = timeStamps.peek();
-      if (candidate == null || candidate >= minTimestamp) {
-        return; 
-      }
-      timeStamps.remove();
-    }
+
+  int getPastSecond() {
+    return pastSecond;
   }
+
+  public void markAppIdle() {
+    pastSecond = 0;
+  }
+
+  public String getDescription() { return description; }
 }
 
 class FilePerfInfo {
-  private final VirtualFile file;
+  long maxTimestamp = -1;
 
-  private final TIntObjectHashMap<SlidingWindowstats> lineCounts = new TIntObjectHashMap<>();
+  private final Multimap<TextRange, SlidingWindowStats> stats = LinkedListMultimap.create();
 
-  public FilePerfInfo(VirtualFile file) {
-    this.file = file;
+  public void clear() {
+    stats.clear();
+    maxTimestamp = -1;
   }
 
-  public VirtualFile getFile() {
-    return file;
+  public Iterable<TextRange> getLines() {
+    return stats.keys();
   }
 
-  public void addCounts(int line, TLongArrayList timestamps) {
-    SlidingWindowstats stats = lineCounts.get(line);
-    if (stats == null) {
-      stats = new SlidingWindowstats();
-      lineCounts.put(line, stats);
-    }
-    for (int i = 0; i < timestamps.size(); ++i) {
-      stats.addCount(timestamps.get(i));
-    }
-  }
-
-  public List<Integer> getLines(long timestamp) {
-    final List<Integer> lines = new ArrayList<>();
-    lineCounts.retainEntries((int line, SlidingWindowstats stats) -> {
-      final int count = stats.getCount(0); // XXX timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
-      if (count > 0) {
-        lines.add(line);
-        return true;
-      }
-      return false;
-    });
-    return lines;
-  }
-
-  public int getCount(int line, long timestamp) {
-    final SlidingWindowstats stats = lineCounts.get(line);
-    if (stats == null) {
+  public int getCountPastSecond(TextRange range) {
+    final Collection<SlidingWindowStats> entries = stats.get(range);
+    if (entries == null) {
       return 0;
     }
-    return stats.getCount(timestamp - SlidingWindowstats.MAX_TIME_WINDOW);
+    int count = 0;
+    for (SlidingWindowStats entry : entries) {
+      count += entry.getPastSecond();
+    }
+    return count;
+  }
+
+  public int getTotalCount(TextRange range) {
+    final Collection<SlidingWindowStats> entries = stats.get(range);
+    if (entries == null) {
+      return 0;
+    }
+    int count = 0;
+    for (SlidingWindowStats entry : entries) {
+      count += entry.getTotal();
+    }
+    return count;
+  }
+
+  Iterable<SlidingWindowStats> getLineStats(TextRange range) {
+    return stats.get(range);
+  }
+
+  public long getMaxTimestamp() {
+    return maxTimestamp;
+  }
+
+  public void add(TextRange range, SlidingWindowStats entry) {
+    stats.put(range, entry);
+  }
+
+  public void markAppIdle() {
+    for (SlidingWindowStats stats : stats.values()) {
+      stats.markAppIdle();
+    }
   }
 }

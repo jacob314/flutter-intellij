@@ -8,30 +8,35 @@ package io.flutter.perf;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import gnu.trove.TLongArrayList;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public class PerfSourceReport {
+  private final PerfReportKind kind;
+
   class Entry {
     Entry(JsonArray entry) {
+      assert entry.size() == 4;
       line = entry.get(0).getAsInt();
-      timeStamps = new TLongArrayList(entry.size() - 1);
-      for (int i = 1; i < entry.size(); i++) {
-        timeStamps.add(entry.get(i).getAsLong());
-      }
+      column = entry.get(1).getAsInt();
+      total = entry.get(2).getAsInt();
+      pastSecond = entry.get(3).getAsInt();
     }
 
     public final int line;
-    public final TLongArrayList timeStamps;
+    public final int column;
+    public final int total;
+    public final int pastSecond;
   }
 
-  public PerfSourceReport(JsonObject json) {
+  public PerfSourceReport(JsonObject json, PerfReportKind kind) {
     this.json = json;
+    this.kind = kind;
   }
   private final JsonObject json;
 
+  PerfReportKind getKind() { return kind; }
   String getFileName() {
     return json.getAsJsonPrimitive("file").getAsString();
   }
