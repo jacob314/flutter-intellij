@@ -17,14 +17,13 @@ import java.util.Collection;
  */
 class SummaryStats {
   private final PerfReportKind kind;
-  private final int total;
+  private final PerfSourceReport.Entry entry;
   private final String description;
-  private int pastSecond = 0;
+  boolean active = true;
 
-  SummaryStats(PerfReportKind kind, int total, int pastSecond, String description) {
+  SummaryStats(PerfReportKind kind, PerfSourceReport.Entry entry, String description) {
     this.kind = kind;
-    this.total = total;
-    this.pastSecond = pastSecond;
+    this.entry = entry;
     this.description = description;
   }
 
@@ -33,15 +32,17 @@ class SummaryStats {
   }
 
   int getTotal() {
-    return total;
+    return entry.total;
   }
-
+  int getTotalSinceNavigation() {
+    return entry.totalSinceNavigation;
+  }
   int getPastSecond() {
-    return pastSecond;
+    return active ? entry.pastSecond : 0;
   }
 
   public void markAppIdle() {
-    pastSecond = 0;
+    active = false;
   }
 
   public String getDescription() {

@@ -20,12 +20,14 @@ import org.dartlang.vm.service.element.IsolateRef;
 import org.dartlang.vm.service.element.RPCError;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 
 public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
   private static final String GET_PERF_SOURCE_REPORTS_EXTENSION = "ext.flutter.inspector.getPerfSourceReports";
+  private static final String DESCRIBE_LOCATION_IDS = "ext.flutter.inspector.describeLocationIds";
   @NotNull final FlutterApp.FlutterAppListener appListener;
   @NotNull final FlutterApp app;
   private VmServiceListener vmServiceListener;
@@ -142,11 +144,10 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
     return connected;
   }
 
-  @Override
-  public CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris) {
+  private CompletableFuture<JsonObject> invokeServiceExtension(String extension, List<String> args) {
     final JsonObject params = new JsonObject();
-    for (int i = 0; i < uris.size(); ++i) {
-      params.addProperty("arg" + i, uris.get(i));
+    for (int i = 0; i < args.size(); ++i) {
+      params.addProperty("arg" + i, args.get(i));
     }
 
     final VmService vmService = app.getVmService();
@@ -155,11 +156,11 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
     final IsolateRef isolateRef = app.getVMServiceManager().getCurrentFlutterIsolateRaw();
 
     final CompletableFuture<JsonObject> future = new CompletableFuture<>();
-    if (!app.getVMServiceManager().hasServiceExtensionNow(GET_PERF_SOURCE_REPORTS_EXTENSION)) {
+    if (!app.getVMServiceManager().hasServiceExtensionNow(extension)) {
       return CompletableFuture.completedFuture(null);
     }
     vmService
-      .callServiceExtension(isolateRef.getId(), GET_PERF_SOURCE_REPORTS_EXTENSION, params, new ServiceExtensionConsumer() {
+      .callServiceExtension(isolateRef.getId(), extension, params, new ServiceExtensionConsumer() {
         @Override
         public void received(JsonObject object) {
           future.complete(object);
@@ -171,6 +172,20 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
         }
       });
     return future;
+  }
+
+  @Override
+  public CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris) {
+    return invokeServiceExtension(GET_PERF_SOURCE_REPORTS_EXTENSION, uris);
+  }
+
+  @Override
+  public CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds) {
+    final List<String> stringLocationIds = new ArrayList<>();
+    for (Integer locationId : locationIds) {
+      stringLocationIds.add(locationId.toString());
+    }
+    return invokeServiceExtension(DESCRIBE_LOCATION_IDS, stringLocationIds);
   }
 
   @Override

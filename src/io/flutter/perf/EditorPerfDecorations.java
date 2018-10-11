@@ -337,28 +337,17 @@ class PerfGutterIconRenderer extends GutterIconRenderer {
   private void showPerfViewMessage() {
     final FlutterView flutterView = ServiceManager.getService(getApp().getProject(), FlutterView.class);
     final InspectorPerfTab inspectorPerfTab = flutterView.showPerfTab(getApp());
-    final StringBuilder sb = new StringBuilder("<html><body>");
-    final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm:ss");
-    sb.append("<p style='padding-bottom: 10px'><strong>Widget performance stats for ");
-    sb.append(Objects.requireNonNull(perfModelForFile.getTextEditor().getFile()).getName());
-    sb.append(" at ");
-    sb.append(formatter.format(LocalDateTime.now()));
-    sb.append("</p>");
-    for (String line : getTooltipLines()) {
-      sb.append(line);
-      sb.append("<br>");
-    }
-    sb.append("</strong>");
-
-    sb.append("<p style='padding-top: 10px'>");
-    sb.append("<small>Rebuilding widgets is generally very cheap. You should only worry " +
-              "about optimizing code to reduce the the number of widget rebuilds " +
-              "if you notice that the frame rate is bellow 60fps or if widgets " +
-              "that you did not expect to be rebuilt are rebuilt a very large " +
-              "number of times.</small>");
-    sb.append("</p>");
-    sb.append("</body></html>");
-    inspectorPerfTab.getWidgetPerfPanel().setPerfMessage(perfModelForFile.getTextEditor(), range, sb.toString());
+    String message = "<html><body>" +
+                getTooltipHtmlFragment() +
+                "<p style='padding-top: 10px'>" +
+                "<small>Rebuilding widgets is generally very cheap. You should only worry " +
+                "about optimizing code to reduce the the number of widget rebuilds " +
+                "if you notice that the frame rate is bellow 60fps or if widgets " +
+                "that you did not expect to be rebuilt are rebuilt a very large " +
+                "number of times.</small>" +
+                "</p>" +
+                "</body></html>";
+    inspectorPerfTab.getWidgetPerfPanel().setPerfMessage(perfModelForFile.getTextEditor(), range, message);
   }
 
   @NotNull
@@ -430,40 +419,35 @@ class PerfGutterIconRenderer extends GutterIconRenderer {
     }
   }
 
-  List<String> getTooltipLines() {
-    final List<String> lines = new ArrayList<>();
+  String getTooltipHtmlFragment() {
+    final StringBuilder sb = new StringBuilder();
+    boolean first = true;
     for (SummaryStats stats : perfModelForFile.getStats().getRangeStats(range)) {
+      final String style = first ? "" : "margin-top: 8px";
+      first = false;
+      sb.append("<p style='" +  style + "'>");
       if (stats.getKind() == PerfReportKind.rebuild) {
-        lines.add(
-          stats.getDescription() +
-          " was rebuilt " +
-          stats.getPastSecond() +
-          " times in the past second and " +
-          stats.getTotal() +
-          " times overall."
-        );
+        sb.append("Rebuild");
+      } else if (stats.getKind() == PerfReportKind.repaint) {
+        sb.append("Repaint");
       }
-      else if (stats.getKind() == PerfReportKind.repaint) {
-        lines.add(
-          "RenderObjects created by " +
-          stats.getDescription() +
-          " were repainted " +
-          stats.getPastSecond() +
-          " times in the past second and " +
-          stats.getTotal() +
-          " times overall."
-        );
-      }
+      sb.append(" counts for: <strong>" + stats.getDescription());
+      sb.append("</strong></p>");
+      sb.append("<p style='padding-left: 8px'>");
+      sb.append("In past second: " + stats.getPastSecond() + "<br>");
+      sb.append("Since last route change: " + stats.getTotalSinceNavigation() + "<br>");
+      sb.append("Since last hot reload/restart: " + stats.getTotal());
+      sb.append("</p>");
     }
-    if (lines.isEmpty()) {
-      lines.add("No widget rebuilds or repaints detected for line.");
+    if (sb.length() == 0) {
+      sb.append("<p><b>No widget rebuilds or repaints detected for line.</p></b>");
     }
-    return lines;
+    return sb.toString();
   }
 
   @Override
   public String getTooltipText() {
-    return "<html><body><b>" + StringUtil.join(getTooltipLines(), "<br>") + " </b></body></html>";
+    return "<html><body>"+ getTooltipHtmlFragment() +"</body></html>";
   }
 
   @Override

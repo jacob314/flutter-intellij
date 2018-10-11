@@ -13,11 +13,22 @@ import java.util.List;
 
 public class PerfSourceReport {
   private final PerfReportKind kind;
-  private final JsonArray entries;
 
-  public PerfSourceReport(JsonArray entries, PerfReportKind kind) {
-    this.entries = entries;
+  private static final int ENTRY_LENGTH = 4;
+
+  private final List<Entry> entries;
+  public PerfSourceReport(JsonArray json, PerfReportKind kind) {
     this.kind = kind;
+    assert (json.size() % ENTRY_LENGTH == 0);
+    entries = new ArrayList<>(json.size() / ENTRY_LENGTH);
+    for (int i = 0; i < json.size(); i += ENTRY_LENGTH) {
+      entries.add(new Entry(
+        json.get(i).getAsInt(),
+        json.get(i + 1).getAsInt(),
+        json.get(i + 2).getAsInt(),
+        json.get(i + 3).getAsInt()
+      ));
+    }
   }
 
   PerfReportKind getKind() {
@@ -25,25 +36,20 @@ public class PerfSourceReport {
   }
 
   List<Entry> getEntries() {
-    final ArrayList<Entry> ret = new ArrayList<>(entries.size());
-    for (JsonElement entryJson : entries) {
-      ret.add(new Entry(entryJson.getAsJsonArray()));
-    }
-    return ret;
+    return entries;
   }
 
   class Entry {
-    public final int line;
-    public final int column;
+    public final int locationId;
     public final int total;
+    public final int totalSinceNavigation;
     public final int pastSecond;
 
-    Entry(JsonArray entry) {
-      assert entry.size() == 4;
-      line = entry.get(0).getAsInt();
-      column = entry.get(1).getAsInt();
-      total = entry.get(2).getAsInt();
-      pastSecond = entry.get(3).getAsInt();
+    Entry(int locationId, int total, int totalSinceNavigation, int pastSecond) {
+      this.locationId = locationId;
+      this.total = total;
+      this.totalSinceNavigation = totalSinceNavigation;
+      this.pastSecond = pastSecond;
     }
   }
 }

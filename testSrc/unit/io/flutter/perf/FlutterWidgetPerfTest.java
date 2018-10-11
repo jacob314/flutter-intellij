@@ -38,7 +38,9 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
   boolean isDisposed = false;
   boolean shouldDisplayStats = true;
   List<List<String>> requests = new ArrayList<>();
-  Queue<String> responses = new ArrayDeque<>();
+  List<Iterable<Integer>> locationIdRequests = new ArrayList<>();
+  Queue<String> perfSourceReportResponses = new ArrayDeque<>();
+  Queue<String> locationIdResponses = new ArrayDeque<>();
 
   @Override
   public void setTarget(Repaintable repaintable) {
@@ -58,7 +60,15 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
   @Override
   public CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris) {
     requests.add(uris);
-    final String response = responses.remove();
+    final String response = perfSourceReportResponses.remove();
+    final JsonParser parser = new JsonParser();
+    return CompletableFuture.completedFuture((JsonObject)parser.parse(response));
+  }
+
+  @Override
+  public CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds) {
+    locationIdRequests.add(locationIds);
+    final String response = locationIdResponses.remove();
     final JsonParser parser = new JsonParser();
     return CompletableFuture.completedFuture((JsonObject)parser.parse(response));
   }
@@ -73,8 +83,12 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
     isDisposed = true;
   }
 
-  public void addResponse(String json) {
-    responses.add(json);
+  public void addCannedPerfSourceReport(String json) {
+    perfSourceReportResponses.add(json);
+  }
+
+  public void addCannedDescribeLocationIdResponse(String json) {
+    locationIdResponses.add(json);
   }
 
   public void repaint(When when) {
@@ -295,7 +309,7 @@ public class FlutterWidgetPerfTest {
   @Test
   public void testStatCalculation() throws InterruptedException, ExecutionException {
     final MockWidgetPerfProvider widgetPerfProvider = new MockWidgetPerfProvider();
-    widgetPerfProvider.addResponse(
+    widgetPerfProvider.addCannedPerfSourceReport(
       "{\"result\":{\"file:///sample/project/clock.dart\":{\"rebuild\":[[37,12,328,48],[74,12,1968,288],[80,16,1968,288],[84,14,1968,288],[87,17,1968,288],[49,7,328,48],[50,16,328,48]]}},\"type\":\"_extensionType\",\"method\":\"ext.flutter.inspector.getPerfSourceReports\"}\n");
 
     final Map<String, MockEditorPerfModel> perfModels = new HashMap<>();
@@ -359,7 +373,7 @@ public class FlutterWidgetPerfTest {
 
     perfModels.clear();
     // This response has both rebuilds and repaints.
-    widgetPerfProvider.addResponse(
+    widgetPerfProvider.addCannedPerfSourceReport(
       "{\"result\":{\"file:///sample/project/clock.dart\":{\"rebuild\":[[37,12,328,48],[74,12,1968,288],[80,16,1968,288],[84,14,1968,288],[87,17,1968,288],[49,7,328,48],[50,16,328,48]],\"repaint\":[[37,12,327,47],[52,13,327,47],[74,12,1962,282],[80,16,1962,282],[84,14,1962,282],[87,17,1962,282],[49,7,327,47],[50,16,327,47]]},\"file:///sample/project/main.dart\":{\"rebuild\":[[24,17,1,0],[41,16,1,0],[47,16,1,0],[70,9,4,0],[71,9,4,0],[72,18,4,0],[42,19,1,0],[43,20,1,0],[52,58,328,48]],\"repaint\":[[41,16,9,0],[24,17,9,0],[46,17,9,0],[47,16,9,0],[48,22,9,0],[64,12,36,0],[67,9,36,0],[70,9,36,0],[71,9,36,0],[72,18,36,0],[42,19,9,0],[43,20,9,0],[19,16,4,0],[11,14,4,0],[52,58,327,47]]}},\"type\":\"_extensionType\",\"method\":\"ext.flutter.inspector.getPerfSourceReports\"}\n");
 
     flutterWidgetPerf.showFor(textEditors);

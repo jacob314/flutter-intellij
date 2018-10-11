@@ -7,6 +7,8 @@ package io.flutter.perf;
 
 import com.google.common.collect.LinkedListMultimap;
 import com.google.common.collect.Multimap;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.concurrency.JobScheduler;
 import com.intellij.openapi.Disposable;
@@ -16,11 +18,14 @@ import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.ui.EdtInvocationManager;
+import gnu.trove.TIntHashSet;
+import gnu.trove.TIntObjectHashMap;
 import io.flutter.utils.AsyncUtils;
 
 import javax.swing.Timer;
 import java.awt.event.ActionEvent;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static io.flutter.inspector.InspectorService.toSourceLocationUri;
@@ -51,6 +56,8 @@ public class FlutterWidgetPerf implements Disposable, Repaintable {
   private long lastRequestTime;
 
   private final Map<TextEditor, EditorPerfModel> editorDecorations = new HashMap<>();
+  private final TIntObjectHashMap<Location> knownLocationIds = new TIntObjectHashMap<>();
+
   final Set<TextEditor> currentEditors = new HashSet<>();
   private boolean profilingEnabled = false;
   final Timer uiAnimationTimer;
@@ -151,80 +158,135 @@ public class FlutterWidgetPerf implements Disposable, Repaintable {
 
     AsyncUtils.whenCompleteUiThread(perfProvider.getPerfSourceReports(uris), (JsonObject object, Throwable e) -> {
       if (e != null || object == null) {
-        performRequestFinish(fileEditors);
+        performRequestFinish();
         return;
       }
-      // True if any of the EditorPerfDecorations want to animate.
-      boolean animate = false;
-      for (String path : editorForPath.keySet()) {
-        final JsonObject result = object.getAsJsonObject("result");
-        if (result == null) {
-          performRequestFinish(fileEditors);
-          return;
-        }
-        final List<PerfSourceReport> reports = new ArrayList<>();
-        if (result.has(path)) {
-          final JsonObject jsonForFile = result.getAsJsonObject(path);
-          for (PerfReportKind kind : PerfReportKind.values()) {
-            if (jsonForFile.has(kind.name)) {
-              reports.add(new PerfSourceReport(jsonForFile.getAsJsonArray(kind.name), kind));
-            }
-          }
-        }
-        for (TextEditor fileEditor : editorForPath.get(path)) {
-          // Ensure the fileEditor is still dealing with this file.
-          // TODO(jacobr): can file editors really change their associated file?
-          if (fileEditor.getFile() != null && toSourceLocationUri(fileEditor.getFile().getPath()).equals(path)) {
-            final EditorPerfModel editorDecoration = editorDecorations.get(fileEditor);
-            if (editorDecoration != null) {
 
-              if (!perfProvider.shouldDisplayPerfStats(fileEditor)) {
-                editorDecoration.clear();
-                continue;
-              }
-              final FileLocationMapper fileLocationMapper = fileLocationMapperFactory.create(fileEditor);
-              final FilePerfInfo stats = new FilePerfInfo();
-              for (PerfSourceReport report : reports) {
-                for (PerfSourceReport.Entry entry : report.getEntries()) {
-                  final TextRange range = fileLocationMapper.getIdentifierRange(entry.line, entry.column);
-                  if (range == null) {
-                    continue;
-                  }
-                  stats.add(
-                    range,
-                    new SummaryStats(
-                      report.getKind(),
-                      entry.total,
-                      entry.pastSecond,
-                      fileLocationMapper.getText(range)
-                    )
-                  );
-                }
-              }
+      final JsonObject result = object.getAsJsonObject("result");
+      if (result == null) {
+        performRequestFinish();
+        return;
+      }
 
-              editorDecoration.setPerfInfo(stats);
-              if (editorDecoration.isAnimationActive()) {
-                animate = true;
-              }
-            }
+      final List<PerfSourceReport> reports = new ArrayList<>();
+      for (PerfReportKind kind : PerfReportKind.values()) {
+        if (result.has(kind.name)) {
+          reports.add(new PerfSourceReport(result.getAsJsonArray(kind.name), kind));
+        }
+      }
+
+      final Set<Integer> unknownIds = new HashSet<>();
+      for (PerfSourceReport report : reports) {
+        for (PerfSourceReport.Entry entry : report.getEntries()) {
+          final int locationId = entry.locationId;
+          if (!knownLocationIds.contains(locationId)) {
+            unknownIds.add(locationId);
           }
         }
       }
-      if (animate != uiAnimationTimer.isRunning()) {
-        if (animate) {
-          uiAnimationTimer.start();
-        }
-        else {
-          uiAnimationTimer.stop();
-        }
+      if (unknownIds.isEmpty()) {
+        showReports(editorForPath, reports);
       }
-      performRequestFinish(fileEditors);
+      else {
+        AsyncUtils.whenCompleteUiThread(
+          resolveLocationIds(unknownIds), (ignored, error) -> {
+            showReports(editorForPath, reports);
+          });
+      }
     });
   }
 
-  private void performRequestFinish(FileEditor[] editors) {
+  private void showReports(Multimap<String, TextEditor> editorForPath, List<PerfSourceReport> reports) {
+    // True if any of the EditorPerfDecorations want to animate.
+    boolean animate = false;
+
+    for (String path : editorForPath.keySet()) {
+      for (TextEditor fileEditor : editorForPath.get(path)) {
+        // Ensure the fileEditor is still dealing with this path.
+        // TODO(jacobr): can path editors really change their associated path?
+        if (fileEditor.getFile() != null && toSourceLocationUri(fileEditor.getFile().getPath()).equals(path)) {
+          final EditorPerfModel editorDecoration = editorDecorations.get(fileEditor);
+          if (editorDecoration != null) {
+            if (!perfProvider.shouldDisplayPerfStats(fileEditor)) {
+              editorDecoration.clear();
+              continue;
+            }
+            final FileLocationMapper fileLocationMapper = fileLocationMapperFactory.create(fileEditor);
+            final FilePerfInfo stats = new FilePerfInfo();
+            for (PerfSourceReport report : reports) {
+              for (PerfSourceReport.Entry entry : report.getEntries()) {
+                final Location location = knownLocationIds.get(entry.locationId);
+                if (location == null || !location.path.equals(path)) {
+                  continue;
+                }
+                final TextRange range = fileLocationMapper.getIdentifierRange(location.line, location.column);
+                if (range == null) {
+                  continue;
+                }
+                stats.add(
+                  range,
+                  new SummaryStats(
+                    report.getKind(),
+                    entry,
+                    fileLocationMapper.getText(range)
+                  )
+                );
+              }
+            }
+
+            editorDecoration.setPerfInfo(stats);
+            if (editorDecoration.isAnimationActive()) {
+              animate = true;
+            }
+          }
+        }
+      }
+    }
+    if (animate != uiAnimationTimer.isRunning()) {
+      if (animate) {
+        uiAnimationTimer.start();
+      }
+      else {
+        uiAnimationTimer.stop();
+      }
+    }
+    performRequestFinish();
+  }
+
+  private CompletableFuture<Void> resolveLocationIds(Iterable<Integer> locationIds) {
+    final CompletableFuture<Void> done = new CompletableFuture<>();
+    AsyncUtils.whenCompleteUiThread(
+      perfProvider.describeLocationIds(locationIds),
+      (JsonObject object, Throwable e) -> {
+        if (e != null) {
+          done.completeExceptionally(e);
+          return;
+        }
+        if (object == null) {
+          done.complete(null);
+          return;
+        }
+        final JsonObject result = object.get("result").getAsJsonObject();
+        for (Map.Entry<String, JsonElement> entry : result.entrySet()) {
+          final String path = entry.getKey();
+          final JsonArray entries = entry.getValue().getAsJsonArray();
+          assert (entries.size() % 3 == 0);
+          for (int i = 0; i < entries.size(); i += 3) {
+            final int id = entries.get(i).getAsInt();
+            final int line = entries.get(i + 1).getAsInt();
+            final int column = entries.get(i + 2).getAsInt();
+            knownLocationIds.put(id, new Location(path, line, column));
+          }
+        }
+        done.complete(null);
+      }
+    );
+    return done;
+  }
+
+  private void performRequestFinish() {
     setRequestInProgress(false);
-    JobScheduler.getScheduler().schedule(() -> maybeNotifyIdle(), 1, TimeUnit.SECONDS);
+    JobScheduler.getScheduler().schedule(this::maybeNotifyIdle, 1, TimeUnit.SECONDS);
     if (isDirty) {
       requestRepaint(When.soon);
     }
@@ -251,7 +313,7 @@ public class FlutterWidgetPerf implements Disposable, Repaintable {
     for (TextEditor fileEditor : currentEditors) {
       // Create a new EditorPerfModel if necessary.
       if (!editorDecorations.containsKey(fileEditor)) {
-        editorDecorations.put(fileEditor, perfModelFactory.create((TextEditor)fileEditor));
+        editorDecorations.put(fileEditor, perfModelFactory.create(fileEditor));
       }
     }
     requestRepaint(When.now);
@@ -295,5 +357,15 @@ public class FlutterWidgetPerf implements Disposable, Repaintable {
 
   public void clear() {
     ApplicationManager.getApplication().invokeLater(this::clearDecorations);
+  }
+
+  private void onRestartHelper() {
+    // The app has restarted. Location ids may not be valid.
+    knownLocationIds.clear();
+    clearDecorations();
+  }
+
+  public void onRestart() {
+    ApplicationManager.getApplication().invokeLater(this::onRestartHelper);
   }
 }

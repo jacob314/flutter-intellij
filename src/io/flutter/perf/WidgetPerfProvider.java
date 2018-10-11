@@ -27,5 +27,7 @@ public interface WidgetPerfProvider extends Disposable {
 
   CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris);
 
+  CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds);
+
   boolean shouldDisplayPerfStats(FileEditor editor);
 }
