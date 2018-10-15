@@ -5,6 +5,11 @@
  */
 package io.flutter.perf;
 
-public interface Repaintable {
+import com.google.gson.JsonObject;
+
+public interface WidgetPerfListener {
   void requestRepaint(When when);
+  void onWidgetPerfEvent(PerfReportKind kind, JsonObject json);
+
+  void onNavigation();
 }

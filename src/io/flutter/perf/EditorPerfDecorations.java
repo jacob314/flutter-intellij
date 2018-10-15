@@ -18,7 +18,6 @@ import com.intellij.openapi.editor.ex.RangeHighlighterEx;
 import com.intellij.openapi.editor.markup.*;
 import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.util.TextRange;
-import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ex.ToolWindowManagerEx;
 import com.intellij.ui.ColorUtil;
@@ -33,8 +32,6 @@ import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
 import java.awt.*;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.List;
 
@@ -339,15 +336,8 @@ class PerfGutterIconRenderer extends GutterIconRenderer {
     final InspectorPerfTab inspectorPerfTab = flutterView.showPerfTab(getApp());
     String message = "<html><body>" +
                 getTooltipHtmlFragment() +
-                "<p style='padding-top: 10px'>" +
-                "<small>Rebuilding widgets is generally very cheap. You should only worry " +
-                "about optimizing code to reduce the the number of widget rebuilds " +
-                "if you notice that the frame rate is bellow 60fps or if widgets " +
-                "that you did not expect to be rebuilt are rebuilt a very large " +
-                "number of times.</small>" +
-                "</p>" +
                 "</body></html>";
-    inspectorPerfTab.getWidgetPerfPanel().setPerfMessage(perfModelForFile.getTextEditor(), range, message);
+    inspectorPerfTab.getWidgetPerfPanel().setPerfStatusMessage(perfModelForFile.getTextEditor(), range, message);
   }
 
   @NotNull

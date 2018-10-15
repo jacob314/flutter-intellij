@@ -17,11 +17,11 @@ import java.util.Collection;
  */
 class SummaryStats {
   private final PerfReportKind kind;
-  private final PerfSourceReport.Entry entry;
+  private final SlidingWindowStatsSummary entry;
   private final String description;
   boolean active = true;
 
-  SummaryStats(PerfReportKind kind, PerfSourceReport.Entry entry, String description) {
+  SummaryStats(PerfReportKind kind, SlidingWindowStatsSummary entry, String description) {
     this.kind = kind;
     this.entry = entry;
     this.description = description;
@@ -32,13 +32,13 @@ class SummaryStats {
   }
 
   int getTotal() {
-    return entry.total;
+    return entry.getTotal();
   }
   int getTotalSinceNavigation() {
-    return entry.totalSinceNavigation;
+    return entry.getTotalSinceNavigation();
   }
   int getPastSecond() {
-    return active ? entry.pastSecond : 0;
+    return active ? entry.getPastSecond() : 0;
   }
 
   public void markAppIdle() {
@@ -47,6 +47,10 @@ class SummaryStats {
 
   public String getDescription() {
     return description;
+  }
+
+  public Location getLocation() {
+    return entry.getLocation();
   }
 }
 
@@ -71,6 +75,7 @@ class FilePerfInfo {
   public Iterable<TextRange> getLocations() {
     return stats.keySet();
   }
+  public Iterable<SummaryStats> getStats() { return stats.values(); }
 
   public boolean hasLocation(TextRange range) {
     return stats.containsKey(range);

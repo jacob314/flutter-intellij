@@ -53,6 +53,10 @@ public class FlutterWidgetPerfManager implements Disposable, FlutterApp.FlutterA
   public static boolean trackRebuildWidgetsDefault = false;
   public static boolean trackRepaintWidgetsDefault = false;
 
+  public FlutterWidgetPerf getCurrentStats() {
+    return currentStats;
+  }
+
   private FlutterWidgetPerf currentStats;
   private FlutterApp app;
   private final Project project;

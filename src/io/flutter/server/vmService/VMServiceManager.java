@@ -30,6 +30,11 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener {
   @NotNull private final FlutterFramesMonitor flutterFramesMonitor;
   @NotNull private final Map<String, EventStream<Boolean>> serviceExtensions = new THashMap<>();
 
+  /**
+   * Optional boolean value indicating whether each service extension should be enabled or disabled.
+   */
+  @NotNull private final Map<String, EventStream<Boolean>> serviceExtensionsState = new THashMap<>();
+
   private final EventStream<IsolateRef> flutterIsolateRefStream;
 
   private boolean isRunning;
@@ -271,15 +276,26 @@ public class VMServiceManager implements FlutterApp.FlutterAppListener {
 
   public @NotNull
   StreamSubscription<Boolean> hasServiceExtension(String name, Consumer<Boolean> onData) {
+    EventStream<Boolean> stream = getStream(name, serviceExtensions);
+    return stream.listen(onData, true);
+  }
+
+  public @NotNull
+  EventStream<Boolean> getServiceExtensionState(String name) {
+    return getStream(name, serviceExtensionsState);
+  }
+
+  @NotNull
+  private EventStream<Boolean> getStream(String name, Map<String, EventStream<Boolean>> state) {
     EventStream<Boolean> stream;
-    synchronized (serviceExtensions) {
-      stream = serviceExtensions.get(name);
+    synchronized (state) {
+      stream = state.get(name);
       if (stream == null) {
         stream = new EventStream<>(false);
-        serviceExtensions.put(name, stream);
+        state.put(name, stream);
       }
     }
-    return stream.listen(onData, true);
+    return stream;
   }
 
   /**

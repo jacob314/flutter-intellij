@@ -8,6 +8,8 @@ package io.flutter.perf;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.util.text.StringUtil;
+import io.flutter.inspector.DiagnosticsNode;
+import io.flutter.inspector.InspectorService;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.server.vmService.VMServiceManager;
 import io.flutter.utils.StreamSubscription;
@@ -31,12 +33,13 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
   @NotNull final FlutterApp.FlutterAppListener appListener;
   @NotNull final FlutterApp app;
   private VmServiceListener vmServiceListener;
-  private Repaintable repaintable;
+  private WidgetPerfListener target;
   private boolean started;
   private boolean isStarted;
   private boolean isDisposed = false;
   private boolean connected;
   private StreamSubscription<IsolateRef> isolateRefStreamSubscription;
+  private CompletableFuture<InspectorService> inspectorService;
 
   VmServiceWidgetPerfProvider(@NotNull FlutterApp app) {
     this.app = app;
@@ -82,15 +85,28 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
     return started;
   }
 
-  public void setTarget(Repaintable repaintable) {
-    this.repaintable = repaintable;
+  public void setTarget(WidgetPerfListener widgetPerfListener) {
+    this.target = widgetPerfListener;
   }
 
   private void requestRepaint(When now) {
-    if (repaintable != null) {
-      repaintable.requestRepaint(now);
+    if (target != null) {
+      target.requestRepaint(now);
     }
   }
+
+  private void onWidgetPerfEvent(PerfReportKind kind, JsonObject json) {
+    if (target != null) {
+      target.onWidgetPerfEvent(kind, json);
+    }
+  }
+
+  private void onNavigation() {
+    if (target != null) {
+      target.onNavigation();
+    }
+  }
+
 
   @Override
   public void dispose() {
@@ -132,6 +148,8 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
       }
     });
 
+    inspectorService = InspectorService.create(app, app.getFlutterDebugProcess(), app.getVmService());
+
     requestRepaint(When.soon);
   }
 
@@ -144,62 +162,37 @@ public class VmServiceWidgetPerfProvider implements WidgetPerfProvider {
     return connected;
   }
 
-  private CompletableFuture<JsonObject> invokeServiceExtension(String extension, List<String> args) {
-    final JsonObject params = new JsonObject();
-    for (int i = 0; i < args.size(); ++i) {
-      params.addProperty("arg" + i, args.get(i));
-    }
-
-    final VmService vmService = app.getVmService();
-    assert vmService != null;
-    assert app.getVMServiceManager() != null;
-    final IsolateRef isolateRef = app.getVMServiceManager().getCurrentFlutterIsolateRaw();
-
-    final CompletableFuture<JsonObject> future = new CompletableFuture<>();
-    if (!app.getVMServiceManager().hasServiceExtensionNow(extension)) {
-      return CompletableFuture.completedFuture(null);
-    }
-    vmService
-      .callServiceExtension(isolateRef.getId(), extension, params, new ServiceExtensionConsumer() {
-        @Override
-        public void received(JsonObject object) {
-          future.complete(object);
-        }
-
-        @Override
-        public void onError(RPCError error) {
-          future.completeExceptionally(new RuntimeException(error.toString()));
-        }
-      });
-    return future;
-  }
-
-  @Override
-  public CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris) {
-    return invokeServiceExtension(GET_PERF_SOURCE_REPORTS_EXTENSION, uris);
-  }
-
-  @Override
-  public CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds) {
-    final List<String> stringLocationIds = new ArrayList<>();
-    for (Integer locationId : locationIds) {
-      stringLocationIds.add(locationId.toString());
-    }
-    return invokeServiceExtension(DESCRIBE_LOCATION_IDS, stringLocationIds);
-  }
-
   @Override
   public boolean shouldDisplayPerfStats(FileEditor editor) {
     return !app.isReloading() && app.isLatestVersionRunning(editor.getFile()) && !editor.isModified();
+  }
+
+  @Override
+  public CompletableFuture<DiagnosticsNode> getWidgetTree() {
+    return inspectorService.thenComposeAsync((inspectorService) -> inspectorService.createObjectGroup("widget_perf").getSummaryTreeWithoutIds());
   }
 
   private void onVmServiceReceived(String streamId, Event event) {
     // TODO(jacobr): centrailize checks for Flutter.Frame
     // They are now in VMServiceManager, InspectorService, and here.
     if (StringUtil.equals(streamId, VmService.EXTENSION_STREAM_ID)) {
-      if (StringUtil.equals("Flutter.Frame", event.getExtensionKind())) {
-        final JsonObject extensionData = event.getExtensionData().getJson();
-        requestRepaint(When.soon);
+      String kind = event.getExtensionKind();
+      if (kind == null) {
+        return;
+      }
+      switch(kind) {
+        case "Flutter.Frame":
+          final JsonObject extensionData = event.getExtensionData().getJson();
+          requestRepaint(When.soon);
+          break;
+        case "Flutter.RebuiltWidgets":
+          onWidgetPerfEvent(PerfReportKind.rebuild, event.getExtensionData().getJson());
+          break;
+        case "Flutter.RepaintedWidgets":
+          onWidgetPerfEvent(PerfReportKind.repaint, event.getExtensionData().getJson());
+          break;
+        case "Flutter.Navigation":
+          onNavigation();
       }
     }
   }

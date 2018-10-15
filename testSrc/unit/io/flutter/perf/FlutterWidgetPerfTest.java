@@ -19,6 +19,7 @@ import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.pom.Navigatable;
+import io.flutter.inspector.DiagnosticsNode;
 import io.flutter.run.daemon.FlutterApp;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -34,7 +35,7 @@ import static org.junit.Assert.*;
 
 class MockWidgetPerfProvider implements WidgetPerfProvider {
 
-  Repaintable repaintable;
+  WidgetPerfListener widgetPerfListener;
   boolean isDisposed = false;
   boolean shouldDisplayStats = true;
   List<List<String>> requests = new ArrayList<>();
@@ -43,8 +44,8 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
   Queue<String> locationIdResponses = new ArrayDeque<>();
 
   @Override
-  public void setTarget(Repaintable repaintable) {
-    this.repaintable = repaintable;
+  public void setTarget(WidgetPerfListener widgetPerfListener) {
+    this.widgetPerfListener = widgetPerfListener;
   }
 
   @Override
@@ -58,24 +59,13 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
   }
 
   @Override
-  public CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris) {
-    requests.add(uris);
-    final String response = perfSourceReportResponses.remove();
-    final JsonParser parser = new JsonParser();
-    return CompletableFuture.completedFuture((JsonObject)parser.parse(response));
-  }
-
-  @Override
-  public CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds) {
-    locationIdRequests.add(locationIds);
-    final String response = locationIdResponses.remove();
-    final JsonParser parser = new JsonParser();
-    return CompletableFuture.completedFuture((JsonObject)parser.parse(response));
-  }
-
-  @Override
   public boolean shouldDisplayPerfStats(FileEditor editor) {
     return shouldDisplayStats;
+  }
+
+  @Override
+  public CompletableFuture<DiagnosticsNode> getWidgetTree() {
+    return CompletableFuture.completedFuture(null);
   }
 
   @Override
@@ -92,7 +82,7 @@ class MockWidgetPerfProvider implements WidgetPerfProvider {
   }
 
   public void repaint(When when) {
-    repaintable.requestRepaint(when);
+    widgetPerfListener.requestRepaint(when);
   }
 }
 

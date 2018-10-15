@@ -8,6 +8,7 @@ package io.flutter.perf;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditor;
+import io.flutter.inspector.DiagnosticsNode;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -19,15 +20,13 @@ import java.util.concurrent.CompletableFuture;
  * See VMServiceWidgetPerfProvider for the non-test implementation of this class.
  */
 public interface WidgetPerfProvider extends Disposable {
-  void setTarget(Repaintable repaintable);
+  void setTarget(WidgetPerfListener widgetPerfListener);
 
   boolean isStarted();
 
   boolean isConnected();
 
-  CompletableFuture<JsonObject> getPerfSourceReports(List<String> uris);
-
-  CompletableFuture<JsonObject> describeLocationIds(Iterable<Integer> locationIds);
-
   boolean shouldDisplayPerfStats(FileEditor editor);
+
+  CompletableFuture<DiagnosticsNode> getWidgetTree();
 }
