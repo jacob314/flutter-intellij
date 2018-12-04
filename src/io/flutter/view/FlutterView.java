@@ -80,7 +80,7 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
 
   private static final Logger LOG = Logger.getInstance(FlutterView.class);
 
-  private static class PerAppState {
+  public static class PerAppState {
     ArrayList<FlutterViewAction> flutterViewActions = new ArrayList<>();
     ArrayList<InspectorPanel> inspectorPanels = new ArrayList<>();
     JBRunnerTabs tabs;
@@ -205,7 +205,7 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     return action;
   }
 
-  private PerAppState getStateForApp(FlutterApp app) {
+  public PerAppState getStateForApp(FlutterApp app) {
     return perAppViewState.get(app);
   }
 

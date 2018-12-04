@@ -185,6 +185,12 @@
       <add-to-group group-id="HelpMenu" anchor="after" relative-to-action="HelpTopics"/>
     </action>
 
+    <action id="io.flutter.view.GettingStartedOverlayAction" class="io.flutter.view.GettingStartedOverlayAction" text="Flutter Getting Started Overlay"
+            description="Show Getting Started Overlay Explaining Flutter Tools">
+      <add-to-group group-id="HelpMenu" anchor="after" relative-to-action="HelpTopics"/>
+      <keyboard-shortcut keymap="$default" first-keystroke="shift F1"/>
+    </action>
+
     <action id="io.flutter.RestartDaemon" class="io.flutter.actions.RestartFlutterDaemonAction"
             text="Restart Flutter Daemon" description="Restart Flutter Daemon" icon="FlutterIcons.Flutter">
     </action>

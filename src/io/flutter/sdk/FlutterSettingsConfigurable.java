@@ -65,6 +65,16 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
   private JCheckBox mySyncAndroidLibrariesCheckBox;
   private JCheckBox myDisableMemoryProfilerCheckBox;
   private JCheckBox myUseNewBazelTestRunner;
+
+  // Settings for UI as Code experiments:
+  private JCheckBox myShowBuildMethodGuides;
+  private JCheckBox myShowMultipleChildrenGuides;
+  private JCheckBox myGreyUnimportantProperties;
+  private JCheckBox myUseLigaturesFont = new JCheckBox(); // Detatched from ui. XXX remove?
+  private JCheckBox myShowDashedLineGuides;
+  private JCheckBox mySimpleIndentIntersectionMode;
+  private JCheckBox myShowBuildMethodsOnScrollbar;
+
   private final @NotNull Project myProject;
 
   FlutterSettingsConfigurable(@NotNull Project project) {
@@ -105,6 +115,23 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     //noinspection Convert2Lambda
     myFormatCodeOnSaveCheckBox
       .addChangeListener((e) -> myOrganizeImportsOnSaveCheckBox.setEnabled(myFormatCodeOnSaveCheckBox.isSelected()));
+
+    // These options are only enabled if build method guides are enabled as the
+    // same class handles all these cases.
+    myShowMultipleChildrenGuides.addChangeListener((e) -> {
+      myShowDashedLineGuides.setEnabled(myShowBuildMethodGuides.isSelected() && myShowMultipleChildrenGuides.isSelected());
+    });
+
+    myShowBuildMethodGuides.addChangeListener((e) -> {
+      myShowMultipleChildrenGuides.setEnabled(myShowBuildMethodGuides.isSelected());
+      myGreyUnimportantProperties.setEnabled(myShowBuildMethodGuides.isSelected());
+      myUseLigaturesFont.setEnabled(myShowBuildMethodGuides.isSelected());
+      myShowDashedLineGuides.setEnabled(myShowBuildMethodGuides.isSelected() && myShowMultipleChildrenGuides.isSelected());
+      mySimpleIndentIntersectionMode.setEnabled(myShowBuildMethodGuides.isSelected());
+      myShowBuildMethodsOnScrollbar.setEnabled(myShowBuildMethodGuides.isSelected());
+    });
+
+
     mySyncAndroidLibrariesCheckBox.setVisible(FlutterUtils.isAndroidStudio());
 
     // Disable the bazel test runner experiment if no new bazel test script is available.
@@ -169,6 +196,29 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
       return true;
     }
 
+    if (settings.isShowBuildMethodGuides() != myShowBuildMethodGuides.isSelected()) {
+      return true;
+    }
+    if (settings.isShowMultipleChildrenGuides() != myShowMultipleChildrenGuides.isSelected()) {
+      return true;
+    }
+    if (settings.isGreyUnimportantProperties() != myGreyUnimportantProperties.isSelected()) {
+      return true;
+    }
+    if (settings.isUseLigaturesFont() != myUseLigaturesFont.isSelected()) {
+      return true;
+    }
+    if (settings.isShowDashedLineGuides() != myShowDashedLineGuides.isSelected()) {
+      return true;
+    }
+    if (settings.isSimpleIndentIntersectionMode() != mySimpleIndentIntersectionMode.isSelected()) {
+      return true;
+    }
+
+    if (settings.isShowBuildMethodsOnScrollbar() != myShowBuildMethodsOnScrollbar.isSelected()) {
+      return true;
+    }
+
     if (settings.useFlutterLogView() != myUseLogViewCheckBox.isSelected()) {
       return true;
     }
@@ -227,6 +277,14 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     settings.setFormatCodeOnSave(myFormatCodeOnSaveCheckBox.isSelected());
     settings.setOrganizeImportsOnSaveKey(myOrganizeImportsOnSaveCheckBox.isSelected());
     settings.setShowPreviewArea(myShowPreviewAreaCheckBox.isSelected());
+
+    settings.setShowBuildMethodGuides(myShowBuildMethodGuides.isSelected());
+    settings.setShowMultipleChildrenGuides(myShowMultipleChildrenGuides.isSelected());
+    settings.setGreyUnimportantProperties(myGreyUnimportantProperties.isSelected());
+    settings.setUseLigaturesFont(myUseLigaturesFont.isSelected());
+    settings.setShowDashedLineGuides(myShowDashedLineGuides.isSelected());
+    settings.setSimpleIndentIntersectionMode(mySimpleIndentIntersectionMode.isSelected());
+    settings.setShowBuildMethodsOnScrollbar(myShowBuildMethodsOnScrollbar.isSelected());
     settings.setUseFlutterLogView(myUseLogViewCheckBox.isSelected());
     settings.setOpenInspectorOnAppLaunch(myOpenInspectorOnAppLaunchCheckBox.isSelected());
     settings.setLegacyTrackWidgetCreation(myLegacyTrackWidgetCreationCheckBox.isSelected());
@@ -258,6 +316,15 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     myFormatCodeOnSaveCheckBox.setSelected(settings.isFormatCodeOnSave());
     myOrganizeImportsOnSaveCheckBox.setSelected(settings.isOrganizeImportsOnSaveKey());
     myShowPreviewAreaCheckBox.setSelected(settings.isShowPreviewArea());
+
+    myShowBuildMethodGuides.setSelected(settings.isShowBuildMethodGuides());
+    myShowMultipleChildrenGuides.setSelected(settings.isShowMultipleChildrenGuides());
+    myGreyUnimportantProperties.setSelected(settings.isGreyUnimportantProperties());
+    myUseLigaturesFont.setSelected(settings.isUseLigaturesFont());
+    myShowDashedLineGuides.setSelected(settings.isShowDashedLineGuides());
+    mySimpleIndentIntersectionMode.setSelected(settings.isSimpleIndentIntersectionMode());
+    myShowBuildMethodsOnScrollbar.setSelected(settings.isShowBuildMethodsOnScrollbar());
+
     myUseLogViewCheckBox.setSelected(settings.useFlutterLogView());
     myOpenInspectorOnAppLaunchCheckBox.setSelected(settings.isOpenInspectorOnAppLaunch());
     myLegacyTrackWidgetCreationCheckBox.setSelected(settings.isLegacyTrackWidgetCreation());
@@ -268,6 +335,15 @@ public class FlutterSettingsConfigurable implements SearchableConfigurable {
     myUseNewBazelTestRunner.setSelected(settings.useNewBazelTestRunner(myProject));
 
     myOrganizeImportsOnSaveCheckBox.setEnabled(myFormatCodeOnSaveCheckBox.isSelected());
+
+    // These options are only enabled if build method guides are enabled as the
+    // same class handles all these cases.
+    myShowMultipleChildrenGuides.setEnabled(myShowBuildMethodGuides.isSelected());
+    myGreyUnimportantProperties.setEnabled(myShowBuildMethodGuides.isSelected());
+    myUseLigaturesFont.setEnabled(myShowBuildMethodGuides.isSelected());
+    myShowDashedLineGuides.setEnabled(myShowBuildMethodGuides.isSelected() && myShowMultipleChildrenGuides.isSelected());
+    mySimpleIndentIntersectionMode.setEnabled(myShowBuildMethodGuides.isSelected());
+    myShowBuildMethodsOnScrollbar.setEnabled(myShowBuildMethodGuides.isSelected());
   }
 
   private void onVersionChanged() {

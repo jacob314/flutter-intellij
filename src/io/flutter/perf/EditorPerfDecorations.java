@@ -22,6 +22,7 @@ import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ex.ToolWindowManagerEx;
 import com.intellij.ui.ColorUtil;
+import com.intellij.ui.Gray;
 import com.intellij.ui.JBColor;
 import com.intellij.xdebugger.XSourcePosition;
 import io.flutter.run.daemon.FlutterApp;
@@ -158,8 +159,11 @@ class EditorPerfDecorations implements EditorMouseListener, EditorPerfModel {
   }
 
   private void addRangeHighlighter(TextRange textRange, MarkupModel markupModel) {
+    TextAttributes attrs = new TextAttributes();
+    attrs.setForegroundColor(Color.LIGHT_GRAY);
+    attrs.setEffectType(EffectType.ROUNDED_BOX);
     final RangeHighlighter rangeHighlighter = markupModel.addRangeHighlighter(
-      textRange.getStartOffset(), textRange.getEndOffset(), HIGHLIGHTER_LAYER, new TextAttributes(), HighlighterTargetArea.EXACT_RANGE);
+      textRange.getStartOffset(), textRange.getEndOffset(), HIGHLIGHTER_LAYER, attrs, HighlighterTargetArea.EXACT_RANGE);
 
     final PerfGutterIconRenderer renderer = new PerfGutterIconRenderer(
       textRange,
@@ -295,7 +299,8 @@ class PerfGutterIconRenderer extends GutterIconRenderer {
     this.perfModelForFile = perfModelForFile;
     final TextAttributes textAttributes = highlighter.getTextAttributes();
     assert textAttributes != null;
-    textAttributes.setEffectType(EffectType.LINE_UNDERSCORE);
+    textAttributes.setEffectType(EffectType.ROUNDED_BOX);
+    textAttributes.setFontType(2);
 
     updateUI(false);
   }
@@ -429,6 +434,8 @@ class PerfGutterIconRenderer extends GutterIconRenderer {
     else {
       textAttributes.setEffectColor(null);
     }
+
+    textAttributes.setBackgroundColor(new JBColor(Gray._224, Gray._32));
     final Color errorStripeColor = getErrorStripeMarkColor();
     highlighter.setErrorStripeMarkColor(errorStripeColor);
     if (repaint && lastIcon != getIconInternal()) {

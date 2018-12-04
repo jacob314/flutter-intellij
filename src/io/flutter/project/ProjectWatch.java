@@ -14,6 +14,8 @@ import com.intellij.openapi.roots.ModuleRootEvent;
 import com.intellij.openapi.roots.ModuleRootListener;
 import com.intellij.util.messages.MessageBusConnection;
 import io.flutter.FlutterUtils;
+import io.flutter.editor.WidgetIndentsPassFactory;
+import io.flutter.settings.FlutterSettings;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.Closeable;
@@ -30,8 +32,11 @@ public class ProjectWatch implements Closeable {
   // Value is null when unsubscribed.
   private final AtomicReference<Runnable> unsubscribe = new AtomicReference<>();
 
+  private final WidgetIndentsPassFactory widgetIndentsPassFactory;
+
   private ProjectWatch(@NotNull Project project, @NotNull Runnable callback) {
     this.callback = callback;
+    widgetIndentsPassFactory = new WidgetIndentsPassFactory(project);
 
     final ProjectManagerListener listener = new ProjectManagerListener() {
       @Override

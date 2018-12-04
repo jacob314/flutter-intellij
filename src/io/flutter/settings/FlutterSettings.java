@@ -7,6 +7,7 @@ package io.flutter.settings;
 
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.components.ServiceManager;
+import com.intellij.openapi.editor.EditorSettings;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.registry.Registry;
 import com.intellij.openapi.util.text.StringUtil;
@@ -34,6 +35,15 @@ public class FlutterSettings {
   private static final String useFlutterLogView = "io.flutter.useLogView";
   private static final String memoryProfilerKey = "io.flutter.memoryProfiler";
   private static final String newBazelTestRunnerKey = "io.flutter.bazel.legacyTestBehavior";
+
+  // Settings for UI as Code experiments.
+  private static final String showBuildMethodGuidesKey = "io.flutter.editor.showBuildMethodGuides";
+  private static final String showMultipleChildrenGuidesKey = "io.flutter.editor.showMultipleChildrenGuides";
+  private static final String greyUnimportantPropertiesKey = "io.flutter.editor.greyUnimportantProperties";
+  private static final String showDashedLineGuidesKey = "io.flutter.editor.showDashedLineGuides";
+  private static final String simpleIndentIntersectionKey = "io.flutter.editor.simpleIndentIntersectionKey";
+  private static final String showBuildMethodsOnScrollbarKey = "io.flutter.editor.showBuildMethodsOnScrollbarKey";
+  private static final String ligaturesFontKey = "io.flutter.editor.ligaturesFontKey";
 
   public static FlutterSettings getInstance() {
     return ServiceManager.getService(FlutterSettings.class);
@@ -233,6 +243,76 @@ public class FlutterSettings {
     getPropertiesComponent().setValue(verboseLoggingKey, value, false);
 
     fireEvent();
+  }
+
+  public boolean isShowBuildMethodGuides() {
+    return getPropertiesComponent().getBoolean(showBuildMethodGuidesKey, true);
+  }
+
+  public void setShowBuildMethodGuides(boolean value) {
+    getPropertiesComponent().setValue(showBuildMethodGuidesKey, value, true);
+
+    fireEvent();
+  }
+
+  public void setShowDashedLineGuides(boolean value) {
+    getPropertiesComponent().setValue(showDashedLineGuidesKey, value, false);
+
+    fireEvent();
+  }
+
+  public boolean isShowDashedLineGuides() {
+    return getPropertiesComponent().getBoolean(showDashedLineGuidesKey, false);
+  }
+
+  public boolean isSimpleIndentIntersectionMode() {
+    return getPropertiesComponent().getBoolean(simpleIndentIntersectionKey, true);
+  }
+
+  public void setSimpleIndentIntersectionMode(boolean value) {
+    getPropertiesComponent().setValue(simpleIndentIntersectionKey, value, true);
+
+    fireEvent();
+  }
+
+  public boolean isShowBuildMethodsOnScrollbar() {
+    return getPropertiesComponent().getBoolean(showBuildMethodsOnScrollbarKey, false);
+  }
+
+  public void setShowBuildMethodsOnScrollbar(boolean value) {
+    getPropertiesComponent().setValue(showBuildMethodsOnScrollbarKey, value, false);
+
+    fireEvent();
+  }
+
+  public boolean isShowMultipleChildrenGuides() {
+    return getPropertiesComponent().getBoolean(showMultipleChildrenGuidesKey, false);
+  }
+
+  public void setShowMultipleChildrenGuides(boolean value) {
+    getPropertiesComponent().setValue(showMultipleChildrenGuidesKey, value, false);
+
+    fireEvent();
+  }
+
+  public boolean isGreyUnimportantProperties() {
+    return getPropertiesComponent().getBoolean(greyUnimportantPropertiesKey, false);
+  }
+
+  public void setGreyUnimportantProperties(boolean value) {
+    getPropertiesComponent().setValue(greyUnimportantPropertiesKey, value, false);
+
+    fireEvent();
+  }
+
+  public void setUseLigaturesFont(boolean value) {
+    getPropertiesComponent().setValue(ligaturesFontKey, value, false);
+
+    fireEvent();
+  }
+
+  public boolean isUseLigaturesFont() {
+    return getPropertiesComponent().getBoolean(ligaturesFontKey, false);
   }
 
   public boolean isMemoryProfilerDisabled() {
