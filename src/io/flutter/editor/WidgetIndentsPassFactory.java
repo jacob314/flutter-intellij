@@ -14,7 +14,6 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.colors.*;
-import com.intellij.openapi.editor.colors.impl.DelegateColorScheme;
 import com.intellij.openapi.editor.colors.impl.FontPreferencesImpl;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.TextAttributes;
@@ -24,10 +23,11 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiFile;
+import io.flutter.FlutterUtils;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
 import io.flutter.settings.FlutterSettings;
-import org.dartlang.analysis.server.protocol.FlutterOutline;
+import org.dartlang.analysis.server.protocol.*;
 import org.jdom.Element;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -81,7 +81,7 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
 
   public WidgetIndentsPassFactory(Project project) { //, TextEditorHighlightingPassRegistrar highlightingPassRegistrar) {
     myProject = project;
-    TextEditorHighlightingPassRegistrar highlightingPassRegistrar = TextEditorHighlightingPassRegistrar.getInstance(project);
+    final TextEditorHighlightingPassRegistrar highlightingPassRegistrar = TextEditorHighlightingPassRegistrar.getInstance(project);
     //      TextEditorHighlightingPassRegistrarEx registrar = (TextEditorHighlightingPassRegistrarEx) TextEditorHighlightingPassRegistrar.getInstance(project);
     highlightingPassRegistrar
       .registerTextEditorHighlightingPass(this, TextEditorHighlightingPassRegistrar.Anchor.AFTER, Pass.UPDATE_FOLDING, false, false);
@@ -90,9 +90,10 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
     passes = new HashMap<>();
     editorsForFile = HashMultimap.create();
     flutterDartAnalysisService = FlutterDartAnalysisServer.getInstance(project);
+
     syncSettings(FlutterSettings.getInstance());
 
-    FlutterSettings.Listener settingsListener = () -> {
+    final FlutterSettings.Listener settingsListener = () -> {
       final FlutterSettings settings = FlutterSettings.getInstance();
       if (isShowBuildMethodGuides == settings.isShowBuildMethodGuides() &&
           isShowMultipleChildrenGuides == settings.isShowMultipleChildrenGuides() &&
@@ -352,9 +353,10 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
   @NotNull
   public TextEditorHighlightingPass createHighlightingPass(@NotNull PsiFile file, @NotNull final Editor e) {
     final EditorEx editor = (EditorEx)e;
-    final String path = editor.getVirtualFile().getPath();
+    VirtualFile virtualFile = editor.getVirtualFile();
+    final String path = virtualFile.getPath();
 
-    if (!FlutterSettings.getInstance().isShowBuildMethodGuides()) {
+    if (!FlutterSettings.getInstance().isShowBuildMethodGuides() || !FlutterUtils.isDartFile(virtualFile)) {
       final WidgetIndentsPass existingPass = passes.get(editor);
       if (existingPass != null) {
         existingPass.dispose();
@@ -365,6 +367,7 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
         // Removed the last listener for this file.
         final FlutterOutlineListener listener = outlineListeners.remove(path);
         if (listener != null) {
+          // TODO(jacobr): not the only time we should remove outline listeners.
           flutterDartAnalysisService.removeOutlineListener(path, listener);
         }
       }
@@ -398,7 +401,10 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
                 currentOutlines.put(path, outline);
                 for (EditorEx candidate : editorsForFile.get(path)) {
                   if (!candidate.isDisposed() && Objects.equals(candidate.getVirtualFile().getCanonicalPath(), path)) {
-                    if (candidate.getDocument().getTextLength() != outline.getLength()) {
+                    if (candidate.getDocument().getTextLength() != outline.getLength() &&
+                        // Workaround windows bug where the outline and document content have inconsistent lengths until the file is modified.
+                        candidate.getDocument().getModificationStamp() != 0) {
+
                       // Outline is out of date. That is ok. Ignore it for now.
                       // An up to date outline will arrive shortly. Showing an
                       // outline from data inconsistent with the current

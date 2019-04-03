@@ -9,29 +9,31 @@ import com.google.common.hash.HashCode;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.RangeMarker;
 import com.intellij.openapi.editor.ex.DocumentEx;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
 
 import static java.lang.Math.max;
 
 public class OutlineLocation implements Comparable<OutlineLocation> {
 
-  public OutlineLocation(FlutterOutline node, int line, int column, int indent) {
+  public OutlineLocation(FlutterOutline node, int line, int column, int indent, VirtualFile file, DartAnalysisServerService analysisService) {
     this.line = line;
     this.column = column;
     // These asserts catch cases where the outline is based on inconsistent
     // state with the document.
     // TODO(jacobr): tweak values so if these errors occur they will not
     // cause exceptions to be thrown in release mode.
-    assert(indent >= 0);
+    assert (indent >= 0);
     assert(column >= 0);
     // It makes no sense for the indent of the line to be greater than the
     // indent of the actual widget.
-    assert(column >= indent);
+    assert (column >= indent);
     assert(line >= 0);
     this.indent = indent;
     this.node = node;
-    this.offset = node.getOffset();
-    this.endOffset = node.getOffset() + node.getLength();
+    this.offset = analysisService.getConvertedOffset(file, node.getOffset());
+    this.endOffset =  analysisService.getConvertedOffset(file,node.getOffset() + node.getLength());
   }
 
   public void dispose() {
@@ -41,11 +43,9 @@ public class OutlineLocation implements Comparable<OutlineLocation> {
   }
 
   public void createMarker(Document document) {
-    if (indent > column) {
-      System.out.println("XXX column and indent out of order");
-    }
+    assert (indent <= column);
     final int delta = max(column - indent, 0);
-    final int markerEnd = node.getOffset();
+    final int markerEnd = offset;
     // Create a range marker that goes from the start of the indent for the line
     // to the column of the actual entity;
     marker = document.createRangeMarker(markerEnd - delta, markerEnd + 1);

@@ -41,6 +41,7 @@ import com.intellij.util.DocumentUtil;
 import com.intellij.util.containers.ContainerUtilRt;
 import com.intellij.util.containers.Stack;
 import com.intellij.util.text.CharArrayUtil;
+import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import com.jetbrains.lang.dart.psi.DartParameterNameReferenceExpression;
 import io.flutter.settings.FlutterSettings;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
@@ -403,10 +404,7 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
                   }
                   break;
                 }
-              }/*
-              else {
-                System.out.println("Caught invalid child!");
-              }*/
+              }
               iChildLine++;
             }
 
@@ -716,7 +714,10 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
   public void setOutline(FlutterOutline outline) {
     assert (outline != null);
 
-    if (myDocument.getTextLength() != outline.getLength()) {
+    /*
+    if (myDocument.getTextLength() != outline.getLength() &&
+        // Workaround windows bug where the outline and document content have inconsistent lengths until the file is modified.
+        myDocument.getModificationStamp() != 0) {
       // The outline is unfortunately out of sync with the Document due
       // to edits being made to the document since when the outline was
       // computed. A new outline will be generated shortly which will
@@ -727,6 +728,7 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
       // this case.
       return;
     }
+     */
     final WidgetIndentsPassData data = getIndentsPassData();
     setIndentsPassData(data); // In case we get interupted make sure we have saved the outline.
 
@@ -1036,14 +1038,25 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
     }
   }
 
+  int getOffset(FlutterOutline node) {
+    return getAnalysisService().getConvertedOffset(myFile.getVirtualFile(), node.getOffset());
+  }
+
+  DartAnalysisServerService getAnalysisService() {
+    // TODO(jacobr): cache?
+    return DartAnalysisServerService.getInstance(myProject);
+  }
+
   private OutlineLocation computeLocation(FlutterOutline node, IndentsCalculator calculator) {
-    final int nodeOffset = node.getOffset();
+    final int nodeOffset = getOffset(node);
     assert (myDocument != null);
+    assert (calculator != null);
     final int line = myDocument.getLineNumber(nodeOffset);
     final int lineStartOffset = myDocument.getLineStartOffset(line);
+
     int column = nodeOffset - lineStartOffset;
     int indent = calculator.lineIndents[line];
-    return new OutlineLocation(node, line, column, indent);
+    return new OutlineLocation(node, line, column, indent, myFile.getVirtualFile(), getAnalysisService());
   }
 
   private void buildWidgetDescriptors(
@@ -1055,21 +1068,10 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
   ) {
     if (outlineNode == null) return;
 
+    assert (calculator != null);
+
     final String kind = outlineNode.getKind();
     final boolean widgetConstructor = "NEW_INSTANCE".equals(kind);
-
-    /*
-    if (!"COMPILATION_UNIT".equals(kind)) {
-      final int offset = outlineNode.getOffset();
-      Element element = outlineNode.getDartElement();
-      if (element != null && !"COMPILATION_UNIT".equals(element.getKind())) {
-        // Highlight these methods like constructor calls.
-        widgetConstructors.add(
-          new StyledTextRange(new TextRange(offset, offset + element.getLocation().getLength()),
-                              widgetConstructorTextAttributes
-          ));
-      }
-    }*/
 
     final List<FlutterOutline> children = outlineNode.getChildren();
     if (children == null || children.isEmpty()) return;
