@@ -7,6 +7,7 @@ package io.flutter.dart;
 
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Uninterruptibles;
+import com.google.dart.server.AnalysisServerListenerAdapter;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
@@ -17,9 +18,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.Consumer;
 import com.intellij.util.ReflectionUtil;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
-import org.dartlang.analysis.server.protocol.FlutterOutline;
-import org.dartlang.analysis.server.protocol.FlutterService;
-import org.dartlang.analysis.server.protocol.SourceChange;
+import org.dartlang.analysis.server.protocol.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -60,6 +59,31 @@ public class FlutterDartAnalysisServer {
   private FlutterDartAnalysisServer(@NotNull Project project) {
     analysisService = DartPlugin.getInstance().getAnalysisService(project);
     analysisService.addResponseListener(FlutterDartAnalysisServer.this::processResponse);
+    analysisService.addAnalysisServerListener(new AnalysisServerListenerAdapter() {
+
+      @Override
+      public void computedOutline(String s, Outline outline) {
+        System.out.println("XXX computed outline for:" + s);
+      }
+
+      @Override
+      public void requestError(RequestError error) {
+        System.out.println("XXX requestErorr:" + error);
+
+      }
+
+      @Override
+      public void serverConnected(String s) {
+        if (!subscriptions.isEmpty()) {
+          sendSubscriptions();
+        }
+      }
+
+      @Override
+      public void serverError(boolean b, String s, String s1) {
+        System.out.println("XXX server error: " + s + s1);
+      }
+    });
   }
 
   public void addOutlineListener(@NotNull final String filePath, @NotNull final FlutterOutlineListener listener) {
