@@ -21,6 +21,8 @@ import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.options.FontSize;
 import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.io.FileUtil;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiFile;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
@@ -350,7 +352,7 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
   @NotNull
   public TextEditorHighlightingPass createHighlightingPass(@NotNull PsiFile file, @NotNull final Editor e) {
     final EditorEx editor = (EditorEx)e;
-    final String path = ((EditorEx)editor).getVirtualFile().getCanonicalPath();
+    final String path = editor.getVirtualFile().getPath();
 
     if (!FlutterSettings.getInstance().isShowBuildMethodGuides()) {
       final WidgetIndentsPass existingPass = passes.get(editor);
@@ -380,7 +382,6 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
       editor.getSettings().setIndentGuidesShown(false);
     }*/
 
-    assert (path != null);
     synchronized (passes) {
       if (!editorsForFile.containsKey(path)) {
        final FlutterOutlineListener listener =
@@ -415,7 +416,8 @@ public class WidgetIndentsPassFactory implements TextEditorHighlightingPassFacto
             });
           };
         outlineListeners.put(path, listener);
-        flutterDartAnalysisService.addOutlineListener(path, listener);
+
+        flutterDartAnalysisService.addOutlineListener(FileUtil.toSystemDependentName(path), listener);
       }
     }
     final FlutterOutline outline;

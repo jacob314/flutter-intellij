@@ -190,6 +190,10 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
   final static JBColor veryLightGray = new JBColor(Gray._224, Gray._80);
   final static JBColor shadowGray = new JBColor(Gray._192, Gray._100);
   final static JBColor outlineLineColor = new JBColor(Gray._128, Gray._128);
+  final static JBColor outlineShadow1 = new JBColor(new Color(128, 128, 128, 80), new Color(128,128,128,160));
+  final static JBColor outlineShadow2 = new JBColor(new Color(128, 128, 128, 40), new Color(128,128,128,80));
+
+  final static Color outlineLineColorPastBlock = new Color(128,128,128, 65);
   final static JBColor childParameterColor = new JBColor(Gray._192, Gray._102);
   final static JBColor BUILD_METHOD_STRIPE_COLOR = new JBColor(new Color(0xc0d8f0), new Color(0xffc66d));
   private static final Key<List<RangeHighlighter>>
@@ -252,6 +256,8 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
         return;
       }
       final Graphics2D g2d = (Graphics2D)g.create();
+      // TODO(jacobr()
+      g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1));
 
       final int startOffset = highlighter.getStartOffset();
       final Document doc = highlighter.getDocument();
@@ -346,18 +352,7 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
       final EditorColorsScheme scheme = editor.getColorsScheme();
       final JBColor lineColor = selected ? JBColor.BLUE : outlineLineColor;
       g2d.setColor(lineColor);
-      Color pastBlockColor = scheme.getColor(selected ? EditorColors.SELECTED_INDENT_GUIDE_COLOR : EditorColors.INDENT_GUIDE_COLOR);
-      if (descriptor.widget == null) {
-        //        if (descriptor.withinWidget == null) {
-        // Regular scheme for indent drawing.
-        pastBlockColor = scheme.getColor(selected ? EditorColors.SELECTED_INDENT_GUIDE_COLOR : EditorColors.INDENT_GUIDE_COLOR);
-  /*  XXX
-      } else {
-          // Within a widget use a ligher color so the effect isn't overwhelming.
-          pastBlockColor = descriptor.withinWidget != null ? new JBColor(Gray._242, Gray._22) : scheme.getColor(EditorColors.SELECTED_INDENT_GUIDE_COLOR);
-        }
-        */
-      }
+      Color pastBlockColor = selected ? scheme.getColor(EditorColors.SELECTED_INDENT_GUIDE_COLOR) : outlineLineColorPastBlock;
 
       // There is a possible case that indent line intersects soft wrap-introduced text. Example:
       //     this is a long line <soft-wrap>
@@ -408,10 +403,10 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
                   }
                   break;
                 }
-              }
+              }/*
               else {
                 System.out.println("Caught invalid child!");
-              }
+              }*/
               iChildLine++;
             }
 
@@ -502,11 +497,11 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
           if (splitY != -1) {
             drawVerticalLineHelper(g2d, lineColor, start.x, y, splitY, childLines, showDashedLinesGuides, showMultipleChildrenGuides);
             g2d.setColor(pastBlockColor);
-            LinePainter2D.paint(g2d, start.x + 2, splitY + 1, start.x + 2, maxY);
+            g2d.drawLine(start.x + 2, (int)splitY + 1, start.x + 2, maxY);
           }
           else {
             g2d.setColor(pastBlockColor);
-            LinePainter2D.paint(g2d, start.x + 2, y, start.x + 2, maxY);
+            g2d.drawLine(start.x + 2, y, start.x + 2, maxY);
           }
         }
       }
@@ -523,21 +518,23 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
       boolean showDashedLinesGuides,
       boolean showMultipleChildrenGuides
     ) {
-      LinePainter2D.paint(g, x + 2, yStart, x + 2, yEnd);
       if (childLines != null && childLines.size() >= 2 && showMultipleChildrenGuides) {
         if (showDashedLinesGuides) {
           g.setStroke(dashed);
-          g.drawLine((int)x, (int)yStart, x, (int)yEnd);
+          g.drawLine((int)x, (int)yStart, x, (int)yEnd+1);
           g.setStroke(solid);
         }
         else {
-          g.setColor(veryLightGray);
-          LinePainter2D.paint(g, x, yStart, x, yEnd);
-          g.setColor(shadowGray);
-          LinePainter2D.paint(g, x + 1, yStart, x + 1, yEnd);
-          g.setColor(lineColor);
+          g.setStroke(new BasicStroke(1));
+          g.setColor(outlineShadow2);
+          g.drawLine(x, (int)yStart, x, (int)yEnd+1);
+          g.setColor(outlineShadow1);
+          g.drawLine(x + 1, (int)yStart, x + 1, (int)yEnd+1);
         }
       }
+      g.setColor(lineColor);
+      g.drawLine(x + 2, (int)yStart, x + 2, (int)yEnd+1);
+
     }
   }
 
@@ -748,9 +745,10 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
     doCollectInformationUpdateOutline(data);
     // Needed to ensure that we don't have outdated regular indent information.
     doCollectInformationHelper(data, true);
-    doApplyIndentInformationToEditor(true, data);
+    doApplyIndentInformationToEditor(true, data, false);
     applyChildParamaterNameHighlighters(data);
-    doApplyIndentInformationToEditor(false, data);
+    // Have to force updates due to outline changes.
+    doApplyIndentInformationToEditor(false, data, true);
     setIndentsPassData(data);
   }
 
@@ -898,7 +896,7 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
 
     final WidgetIndentsPassData data = getIndentsPassData();
     applyChildParamaterNameHighlighters(data);
-    doApplyIndentInformationToEditor(false, data);
+    doApplyIndentInformationToEditor(false, data, false);
     setIndentsPassData(data);
   }
 
@@ -970,13 +968,13 @@ public class WidgetIndentsPass extends TextEditorHighlightingPass implements Dum
                              HighlighterTargetArea.EXACT_RANGE);
   }
 
-  public void doApplyIndentInformationToEditor(boolean updateWidgets, WidgetIndentsPassData data) {
+  public void doApplyIndentInformationToEditor(boolean updateWidgets, WidgetIndentsPassData data, boolean forceUpdate) {
     final MarkupModel mm = myEditor.getMarkupModel();
     final RangeHighlighter[] existing = mm.getAllHighlighters();
 
     final Key<Long> timeKey = updateWidgets ? LAST_TIME_WIDGET_INDENTS_BUILT : LAST_TIME_SIMPLE_INDENTS_BUILT;
     final Long stamp = myEditor.getUserData(timeKey);
-    if (stamp != null && stamp == nowStamp()) return;
+    if (stamp != null && stamp == nowStamp() && !forceUpdate) return;
 
     final Key<List<RangeHighlighter>> highlighterKey =
       updateWidgets ? WIDGET_INDENT_HIGHLIGHTERS_IN_EDITOR_KEY : SIMPLE_INDENT_HIGHLIGHTERS_IN_EDITOR_KEY;
