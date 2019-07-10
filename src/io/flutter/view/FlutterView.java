@@ -182,12 +182,12 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
                                            Disposable parentDisposable,
                                            InspectorService inspectorService) {
     final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
-    toolbarGroup.add(registerAction(new ToggleInspectModeAction(app)));
     if (inspectorService != null) {
-      toolbarGroup.addSeparator();
       toolbarGroup.add(registerAction(new ForceRefreshAction(app, inspectorService)));
+      toolbarGroup.addSeparator();
     }
     toolbarGroup.addSeparator();
+//    toolbarGroup.add(registerAction(new DebugDrawAction(app))); XXX??
     toolbarGroup.add(registerAction(new PerformanceOverlayAction(app)));
     toolbarGroup.add(registerAction(new TogglePlatformAction(app)));
     toolbarGroup.addSeparator();
@@ -397,6 +397,8 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
       whenCompleteUiThread(
         InspectorService.create(app, app.getFlutterDebugProcess(), app.getVmService()),
         (InspectorService inspectorService, Throwable throwable) -> {
+          // XXX remove
+          // app.getFlutterDebugProcess().setInspectorService(inspectorService);
           if (throwable != null) {
             FlutterUtils.warn(LOG, throwable);
             return;
@@ -462,6 +464,9 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
           onAppChanged(app);
           final PerAppState state = perAppViewState.remove(app);
           if (state != null && state.content != null) {
+            for (InspectorPanel panel : state.inspectorPanels) {
+              panel.dispose();
+            }
             contentManager.removeContent(state.content, true);
           }
           if (perAppViewState.isEmpty()) {
@@ -785,9 +790,10 @@ class OverflowAction extends ToolbarComboBoxAction implements RightAlignedToolba
     group.addSeparator();
     group.add(view.registerAction(new FlutterViewDevToolsAction(app)));
     group.addSeparator();
-    group.add(view.registerAction(new OpenTimelineViewAction(app)));
-    group.add(view.registerAction(new OpenObservatoryAction(app)));
+    group.add(view.registerAction(new ToggleInspectModeAction(app)));
 
     return group;
   }
 }
+
+

@@ -70,6 +70,8 @@ public class FlutterIcons {
   public static final Icon Styling = load("/icons/inspector/atrule.png");
   public static final Icon Text = load("/icons/inspector/textArea.png");
 
+  public static final Icon PhoneMirrorIntro = load("/icons/inspector/phone_mirror_intro_dark.png");
+
   public static final Icon ExpandProperty = load("/icons/inspector/expand_property.png");
   public static final Icon CollapseProperty = load("/icons/inspector/collapse_property.png");
 

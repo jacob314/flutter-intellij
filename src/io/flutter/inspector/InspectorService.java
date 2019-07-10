@@ -11,18 +11,20 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.util.SystemInfo;
 import com.intellij.xdebugger.XSourcePosition;
+import com.intellij.xdebugger.evaluation.XDebuggerEditorsProvider;
+import com.jetbrains.lang.dart.ide.runner.server.vmService.VmServiceConsumers;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.FlutterDebugProcess;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.StreamSubscription;
 import io.flutter.utils.VmServiceListenerAdapter;
 import io.flutter.vmService.ServiceExtensions;
-import io.flutter.vmService.VmServiceConsumers;
 import io.flutter.vmService.frame.DartVmServiceValue;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
 
+import java.awt.image.BufferedImage;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -180,6 +182,10 @@ public class InspectorService implements Disposable {
   public void dispose() {
     inspectorLibrary.dispose();
     setPubRootDirectoriesSubscription.dispose();
+  }
+
+  public CompletableFuture<BufferedImage> getScreenshot() {
+    return inspectorLibrary.getScreenshot();
   }
 
   public CompletableFuture<?> forceRefresh() {
@@ -524,6 +530,14 @@ public class InspectorService implements Disposable {
       return invokeServiceMethodDaemon(methodName, params);
     }
 
+    CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, double x, double y, String objectGroup) {
+      final Map<String, Object> params = new HashMap<>();
+      params.put("x", x);
+      params.put("y", y);
+      params.put("objectGroup", objectGroup);
+      return invokeServiceMethodDaemon(methodName, params);
+    }
+
     // All calls to invokeServiceMethodDaemon bottom out to this call.
     CompletableFuture<JsonElement> invokeServiceMethodDaemon(String methodName, Map<String, Object> params) {
       return getInspectorLibrary().addRequest(
@@ -543,6 +557,16 @@ public class InspectorService implements Disposable {
         return invokeServiceMethodDaemon(methodName, null, groupName);
       }
       return invokeServiceMethodDaemon(methodName, arg.getId(), groupName);
+    }
+
+    public CompletableFuture<DiagnosticsNode> inspectAt(double x, double y) {
+      // TODO(jacobr): support observatory protocol as well. XXX
+      return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("inspectAt", x, y, groupName));
+    }
+
+    public CompletableFuture<DiagnosticsNode> hoverAt(double x, double y) {
+      // TODO(jacobr): support observatory protocol as well. XXX
+      return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("hoverAt", x, y, groupName));
     }
 
     CompletableFuture<InstanceRef> invokeServiceMethodObservatory(String methodName, InspectorInstanceRef arg) {
@@ -660,13 +684,19 @@ public class InspectorService implements Disposable {
      * Requires that the InstanceRef is really referring to a String that is valid JSON.
      */
     CompletableFuture<JsonElement> instanceRefToJson(InstanceRef instanceRef) {
-
       return nullIfDisposed(() -> getInspectorLibrary().getInstance(instanceRef, this).thenApplyAsync((Instance instance) -> {
         return nullValueIfDisposed(() -> {
           final String json = instance.getValueAsString();
           return new JsonParser().parse(json);
         });
       }));
+    }
+
+    /**
+     * Requires that the InstanceRef is really referring to a String that is valid JSON.
+     */
+    CompletableFuture<JsonElement> instanceRefToJson(CompletableFuture<InstanceRef> instanceRefFuture) {
+      return nullIfDisposed(() -> instanceRefFuture.thenComposeAsync(this::instanceRefToJson));
     }
 
     CompletableFuture<ArrayList<DiagnosticsNode>> parseDiagnosticsNodesObservatory(InstanceRef instanceRef, DiagnosticsNode parent) {
@@ -699,7 +729,23 @@ public class InspectorService implements Disposable {
      * Converts an inspector ref to value suitable for use by generic intellij
      * debugging tools.
      * <p>
-     * Warning: DartVmServiceValue references do not make any lifetime guarantees
+     * Warning: FlutterVmServiceValue references do not make any lifetime guarantees
+     * so code keeping them around for a long period of time must be prepared to
+     * handle reference expiration gracefully.
+     */
+    public CompletableFuture<DartVmServiceValue> toDartVmServiceValue(InspectorInstanceRef inspectorInstanceRef) {
+      return invokeServiceMethodObservatory("toObject", inspectorInstanceRef).thenApplyAsync(
+        (InstanceRef instanceRef) -> nullValueIfDisposed(() -> {
+          //noinspection CodeBlock2Expr
+          return new DartVmServiceValue(debugProcess, inspectorLibrary.getIsolateId(), "inspectedObject", instanceRef, null, null, false);
+        }));
+    }
+
+    /**
+     * Converts an inspector ref to value suitable for use by generic intellij
+     * debugging tools.
+     * <p>
+     * Warning: FlutterVmServiceValue references do not make any lifetime guarantees
      * so code keeping them around for a long period of time must be prepared to
      * handle reference expiration gracefully.
      */
@@ -733,6 +779,21 @@ public class InspectorService implements Disposable {
       }
     }
 
+    public CompletableFuture<InspectorSourceLocation> getCreationLocation(InstanceRef instanceRef) {
+      if (!supportedServiceMethods.contains("getCreationLocation")) {
+        return CompletableFuture.completedFuture(null);
+      };
+
+      CompletableFuture<JsonElement> creationLocationFuture =
+        instanceRefToJson(invokeServiceMethodOnRefObservatory("getCreationLocation", instanceRef));
+
+      return nullIfDisposed(() -> creationLocationFuture.thenApplyAsync((JsonElement json) -> {
+        if (json == null || !json.isJsonObject()) {
+          return null;
+        }
+        return new InspectorSourceLocation((JsonObject)json, null);
+      }));
+    }
     CompletableFuture<ArrayList<DiagnosticsNode>> getProperties(InspectorInstanceRef instanceRef) {
       return getListHelper(instanceRef, "getProperties", null);
     }
@@ -950,6 +1011,10 @@ public class InspectorService implements Disposable {
         return CompletableFuture.completedFuture(null);
       }
       return nullIfDisposed(() -> invokeServiceMethodReturningNode("getDetailsSubtree", node.getDartDiagnosticRef()));
+    }
+
+    public XDebuggerEditorsProvider getEditorsProvider() {
+      return InspectorService.this.getDebugProcess().getEditorsProvider();
     }
 
     FlutterApp getApp() {
