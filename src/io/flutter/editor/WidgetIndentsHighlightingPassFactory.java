@@ -15,9 +15,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.EditorFactory;
-import com.intellij.openapi.editor.event.CaretEvent;
-import com.intellij.openapi.editor.event.CaretListener;
-import com.intellij.openapi.editor.event.EditorEventMulticaster;
+import com.intellij.openapi.editor.event.*;
 import com.intellij.openapi.editor.ex.DocumentEx;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.fileEditor.*;
@@ -30,11 +28,15 @@ import com.intellij.psi.PsiFile;
 import io.flutter.FlutterUtils;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
+import io.flutter.perf.FlutterWidgetPerfManager;
 import io.flutter.settings.FlutterSettings;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
 import org.jetbrains.annotations.NotNull;
 
+import java.awt.*;
+import java.awt.event.MouseEvent;
 import java.util.*;
+import java.util.List;
 
 /**
  * Factory that drives all rendering of widget indents.
@@ -83,6 +85,13 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
     }
   };
 
+  EditorEx getIfValidForProject(Editor editor) {
+    if (editor.getProject() != project) return null;
+    if (editor.isDisposed() || project.isDisposed()) return null;
+    if (!(editor instanceof EditorEx)) return null;
+    return (EditorEx)editor;
+  }
+
   public WidgetIndentsHighlightingPassFactory(Project project) {
     this.project = project;
 
@@ -95,15 +104,42 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
     FlutterSettings.getInstance().addListener(settingsListener);
 
     final EditorEventMulticaster eventMulticaster = EditorFactory.getInstance().getEventMulticaster();
+    eventMulticaster.addVisibleAreaListener((VisibleAreaEvent event) -> {
+      final EditorEx editorEx = getIfValidForProject(event.getEditor());
+      if (editorEx == null) return;
+      WidgetIndentsHighlightingPass.onVisibleAreaChanged(editorEx, event.getOldRectangle(), event.getNewRectangle());
+    });
+    eventMulticaster.addEditorMouseMotionListener(new EditorMouseMotionListener() {
+      @Override
+      public void mouseMoved(@NotNull EditorMouseEvent e) {
+        final EditorEx editorEx = getIfValidForProject(e.getEditor());
+        if (editorEx == null) return;
+        WidgetIndentsHighlightingPass.onMouseMoved(editorEx, e.getMouseEvent());
+      }
+    });
+    eventMulticaster.addEditorMouseListener(new EditorMouseListener() {
+      @Override
+      public void mousePressed(@NotNull EditorMouseEvent event) {
+        final EditorEx editorEx = getIfValidForProject(event.getEditor());
+        if (editorEx == null) return;
+        WidgetIndentsHighlightingPass.onMousePressed(editorEx, event.getMouseEvent());
+        /*
+
+        if (event.getSource() instanceof TextEditor) {
+          final TextEditor editor = (TextEditor) event.getSource();
+          if (event.getArea().equals(EditorMouseEventArea.EDITING_AREA)) {
+            MouseEvent m = event.getMouseEvent();
+            System.out.println("XXX absolute:" + m.getX() + ", " + m.getY());
+            System.out.println("XXX onScreen" + m.getXOnScreen() + ", " + m.getYOnScreen());
+          }
+        }*/
+      }
+    }, this);
     eventMulticaster.addCaretListener(new CaretListener() {
       @Override
       public void caretPositionChanged(@NotNull CaretEvent event) {
-        final Editor editor = event.getEditor();
-        if (editor.getProject() != project) return;
-        if (editor.isDisposed() || project.isDisposed()) return;
-        if (!(editor instanceof EditorEx)) return;
-        final EditorEx editorEx = (EditorEx)editor;
-        WidgetIndentsHighlightingPass.onCaretPositionChanged(editorEx, event.getCaret());
+        final EditorEx editor = getIfValidForProject(event.getEditor());
+        WidgetIndentsHighlightingPass.onCaretPositionChanged(editor, event.getCaret());
       }
     }, this);
 
@@ -313,6 +349,7 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
       return;
     }
 
+// XXX    FlutterWidgetPerfManager perfManager = FlutterWidgetPerfManager.getInstance(project);
     WidgetIndentsHighlightingPass.run(project, editor, outline);
   }
 

@@ -12,7 +12,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.util.SystemInfo;
 import com.intellij.xdebugger.XSourcePosition;
 import com.intellij.xdebugger.evaluation.XDebuggerEditorsProvider;
-import com.jetbrains.lang.dart.ide.runner.server.vmService.VmServiceConsumers;
+import io.flutter.vmService.VmServiceConsumers;
 import io.flutter.pub.PubRoot;
 import io.flutter.run.FlutterDebugProcess;
 import io.flutter.run.daemon.FlutterApp;

@@ -17,18 +17,27 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.Segment;
 import com.intellij.openapi.util.TextRange;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
 import com.intellij.ui.Gray;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.paint.LinePainter2D;
 import com.intellij.util.DocumentUtil;
 import com.intellij.util.text.CharArrayUtil;
+import com.intellij.util.ui.UIUtil;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
+import com.jetbrains.lang.dart.psi.*;
 import io.flutter.settings.FlutterSettings;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
+import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
 import org.jetbrains.annotations.NotNull;
 
 import java.awt.*;
+import java.awt.event.MouseEvent;
+import java.awt.font.FontRenderContext;
 import java.util.List;
 import java.util.*;
 
@@ -107,10 +116,12 @@ public class WidgetIndentsHighlightingPass {
     private final WidgetIndentGuideDescriptor descriptor;
     private final Document document;
     private boolean isSelected = false;
+    private final WidgetIndentsPassData data; // XXX for visilbe rect only.
 
-    WidgetCustomHighlighterRenderer(WidgetIndentGuideDescriptor descriptor, Document document) {
+    WidgetCustomHighlighterRenderer(WidgetIndentGuideDescriptor descriptor, Document document, WidgetIndentsPassData data) {
       this.descriptor = descriptor;
       this.document = document;
+      this.data = data;
       descriptor.trackLocations(document);
     }
 
@@ -167,6 +178,20 @@ public class WidgetIndentsHighlightingPass {
         caretOffset >= off && caretOffset < endOffset && caretModel.getLogicalPosition().column == indentColumn);
     }
 
+    // XXX optimize
+    private static float computeStringWidth(Editor editor, String text, Font font) {
+      if (StringUtil.isEmpty(text)) return 0;
+      final FontMetrics metrics = editor.getComponent().getFontMetrics(font);
+
+      final FontRenderContext fontRenderContext = metrics.getFontRenderContext();
+      return (float)font.getStringBounds(text, fontRenderContext).getWidth();
+    }
+
+    Point offsetToPoint(int offset, Editor editor) {
+      VisualPosition visualPosition = editor.offsetToVisualPosition(offset);
+      return editor.visualPositionToXY(visualPosition);
+    }
+
     @Override
     public void paint(@NotNull Editor editor, @NotNull RangeHighlighter highlighter, @NotNull Graphics g) {
       if (!highlighter.isValid()) {
@@ -195,6 +220,131 @@ public class WidgetIndentsHighlightingPass {
 
       int off;
       int startLine = doc.getLineNumber(startOffset);
+      final int lineHeight = editor.getLineHeight();
+      final Rectangle clip = g2d.getClipBounds();
+
+      if (descriptor != null)
+      {
+        int widgetOffset = descriptor.widget.getOffset();
+        int widgetLine = doc.getLineNumber(widgetOffset);
+        int lineEndOffset = doc.getLineEndOffset(widgetLine);
+        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+        final Font font = UIUtil.getFont(UIUtil.FontSize.NORMAL, UIUtil.getTreeFont());
+        g2d.setFont(font);
+        if (descriptor.parent == null) {
+          // Request a thumbnail and render it in the space available.
+          VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
+          visualPosition = new VisualPosition(max(visualPosition.line, 0), max(visualPosition.column + 30, 81));
+          final Point start = editor.visualPositionToXY(visualPosition);
+          final Point endz = offsetToPoint(endOffset, editor);
+          int endY = endz.y;
+
+          int previewWidth = 240;
+          int previewHeight = 320;
+          if (editor instanceof EditorEx) {
+            EditorEx textEditor = (EditorEx) editor;
+
+            /* XXX doesn't quite work as our range highlighter doesn't extend far enough. */
+            /* if (endY - start.y < previewHeight) {
+              int oldEndY = endY;
+              endY = start.y + previewHeight;
+              if (descriptor.nextSibling != null) {
+                VisualPosition siblingStart = editor.offsetToVisualPosition(descriptor.nextSibling.widget.getOffset()); //
+                siblingStart = new VisualPosition(max(0, siblingStart.line - 2), siblingStart.column);
+                final Point siblingStartPt = editor.visualPositionToXY(siblingStart);
+                endY = max(oldEndY, siblingStartPt.y);
+              }
+            }*/
+
+            int visibleEndX = data.visibleRect.x + data.visibleRect.width;
+            int width = max(0, visibleEndX - 20 - start.x);
+            int height = max(0, endY - start.y);
+            g2d.setColor(Gray._48);
+            g2d.fillRect(start.x, start.y, width, height);
+            int previewStartY = start.y;
+            int previewStartX = start.x;
+            assert (data.visibleRect != null);
+            int visibleStart = data.visibleRect.y;
+            int visibleEnd = (int)data.visibleRect.getMaxY();
+            previewStartX = max(previewStartX, visibleEndX - previewWidth - 20);
+            previewHeight = min(previewHeight, height);
+
+            if (start.y <= visibleEnd && endY >= visibleStart) {
+              if (visibleStart > previewStartY) {
+                previewStartY = max(previewStartY, visibleStart);
+                previewStartY = min(previewStartY, min(endY - previewHeight, visibleEnd - previewHeight));
+              }
+              /// XXX do proper clipping as well to optimize. ?
+              g2d.setColor(JBColor.BLUE);
+              g2d.fillRect(previewStartX, previewStartY, previewWidth, previewHeight);
+
+            }
+          }
+        }
+
+        {
+          g2d.setColor(descriptor.parent == null ? JBColor.blue : JBColor.red);
+          VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
+          visualPosition = new VisualPosition(visualPosition.line, max(visualPosition.column + 1, 4));
+          // final VisualPosition startPosition = editor.offsetToVisualPosition(off);
+          final Point start = editor.visualPositionToXY(visualPosition);
+          if (start.y + lineHeight > clip.y && start.y < clip.y + clip.height) {
+            g2d.drawString("WIDGET!", start.x, start.y + lineHeight - 4);
+          }
+        }
+        for (WidgetIndentGuideDescriptor.WidgetPropertyDescriptor property : descriptor.properties) {
+          int propertyEndOffset = property.getEndOffset();
+          int propertyLine = doc.getLineNumber(propertyEndOffset);
+          lineEndOffset = doc.getLineEndOffset(propertyLine);
+
+          VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
+          visualPosition = new VisualPosition(visualPosition.line, max(visualPosition.column + 1, 4));
+          // final VisualPosition startPosition = editor.offsetToVisualPosition(off);
+          final Point start = editor.visualPositionToXY(visualPosition);
+          if (start.y + lineHeight > clip.y && start.y < clip.y + clip.height) {
+
+            String text;
+            String value;
+            FlutterOutlineAttribute attribute = property.getAttribute();
+            boolean constValue = false;
+            if (attribute.getLiteralValueBoolean() != null) {
+              value = attribute.getLiteralValueBoolean().toString();
+              constValue = true;
+            }
+            else if (attribute.getLiteralValueInteger() != null) {
+              value = attribute.getLiteralValueInteger().toString();
+              constValue = true;
+            }
+            else if (attribute.getLiteralValueString() != null) {
+              value = '"' + attribute.getLiteralValueString() + '"';
+              constValue = true;
+            }
+            else {
+              value = attribute.getLabel();
+              if (value == null) {
+                value = "<loading value>";
+              }
+            }
+            if (property.getName().equals("data")) {
+              text = value;
+            }
+            else {
+              text = property.getName() + ": " + value;
+            }
+
+            // TODO(jacobr): detect other const like things and hide them.
+            if (constValue == false) {
+              float width = computeStringWidth(editor, text, font);
+              //          g2d.setColor(JBColor.LIGHT_GRAY);
+              //        g2d.fillRect(start.x, start.y, (int)width + 8, lineHeight);
+              g2d.setColor(SHADOW_GRAY);
+              g2d.drawString(text, start.x + 4, start.y + lineHeight - 4);
+            }
+          }
+        }
+      }
+
 
       final CharSequence chars = doc.getCharsSequence();
       do {
@@ -264,7 +414,6 @@ public class WidgetIndentsHighlightingPass {
         maxY += editor.getLineHeight();
       }
 
-      final Rectangle clip = g2d.getClipBounds();
       if (clip != null) {
         if (clip.y > maxY || clip.y + clip.height < start.y) {
           return;
@@ -299,7 +448,6 @@ public class WidgetIndentsHighlightingPass {
       int newY = start.y;
       final int maxYWithChildren = y;
       final SoftWrapModel softWrapModel = editor.getSoftWrapModel();
-      final int lineHeight = editor.getLineHeight();
       int iChildLine = 0;
       for (int i = max(0, startLine + lineShift); i < endLine && newY < maxY; i++) {
         OutlineLocation childLine = null;
@@ -425,12 +573,14 @@ public class WidgetIndentsHighlightingPass {
   private final Document myDocument;
   private final Project myProject;
   private final VirtualFile myFile;
+  private final PsiFile psiFile;
 
   WidgetIndentsHighlightingPass(@NotNull Project project, @NotNull EditorEx editor) {
     this.myDocument = editor.getDocument();
     this.myEditor = editor;
     this.myProject = project;
     this.myFile = editor.getVirtualFile();
+    psiFile = PsiDocumentManager.getInstance(myProject).getPsiFile(myDocument);
   }
 
   private static void drawVerticalLineHelper(
@@ -499,6 +649,26 @@ public class WidgetIndentsHighlightingPass {
     }
   }
 
+  public static void onVisibleAreaChanged(EditorEx editor, Rectangle oldRectangle, Rectangle newRectangle) {
+    WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null) {
+      data = new WidgetIndentsPassData();
+      setIndentsPassData(editor, data);
+    }
+    data.visibleRect = newRectangle;
+  }
+
+  public static void onMouseMoved(EditorEx editor, MouseEvent event) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
+  }
+
+  public static void onMousePressed(EditorEx editor, MouseEvent event) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
+
+  }
+
   private static WidgetIndentsPassData getIndentsPassData(Editor editor) {
     return editor.getUserData(INDENTS_PASS_DATA_KEY);
   }
@@ -515,12 +685,22 @@ public class WidgetIndentsHighlightingPass {
     final WidgetIndentsPassData data = getIndentsPassData(editor);
     if (data == null) return;
 
-    final List<RangeHighlighter> oldHighlighters = data.highlighters;
+    List<RangeHighlighter> oldHighlighters = data.highlighters;
     if (oldHighlighters != null) {
       for (RangeHighlighter highlighter : oldHighlighters) {
         disposeHighlighter(highlighter);
       }
     }
+
+    /*
+     oldHighlighters = data.propertyHighlighters;
+    if (oldHighlighters != null) {
+      for (RangeHighlighter highlighter : oldHighlighters) {
+        disposeHighlighter(highlighter);
+      }
+    }
+
+     */
     setIndentsPassData(editor, null);
   }
 
@@ -551,11 +731,15 @@ public class WidgetIndentsHighlightingPass {
     final ArrayList<WidgetIndentGuideDescriptor> descriptors = new ArrayList<>();
 
     buildWidgetDescriptors(descriptors, outline, null);
+    for (int i = 0; i< descriptors.size() - 1; i++) {
+      descriptors.get(i).nextSibling = descriptors.get(i+1);
+    }
     updateHitTester(new WidgetIndentHitTester(descriptors, myDocument), data);
     // TODO(jacobr): we need to trigger a rerender of highlighters that will render differently due to the changes in highlighters?
     data.myDescriptors = descriptors;
     doCollectInformationUpdateOutline(data);
     doApplyIndentInformationToEditor(data);
+    // XXXdoApplyPropertyInformationToEditor(data);
     setIndentsPassData(data);
   }
 
@@ -634,6 +818,68 @@ public class WidgetIndentsHighlightingPass {
 
         final int cmp = compare(entry, highlighter);
         if (cmp < 0) {
+          newHighlighters.add(createHighlighter(mm, entry, data));
+          curRange++;
+        }
+        else if (cmp > 0) {
+          disposeHighlighter(highlighter);
+          curHighlight++;
+        }
+        else {
+          newHighlighters.add(highlighter);
+          curHighlight++;
+          curRange++;
+        }
+      }
+
+      for (; curHighlight < oldHighlighters.size(); curHighlight++) {
+        final RangeHighlighter highlighter = oldHighlighters.get(curHighlight);
+        if (!highlighter.isValid()) break;
+        disposeHighlighter(highlighter);
+      }
+    }
+
+
+    final int startRangeIndex = curRange;
+    assert myDocument != null;
+    DocumentUtil.executeInBulk(myDocument, ranges.size() > 10000, () -> {
+      for (int i = startRangeIndex; i < ranges.size(); i++) {
+        newHighlighters.add(createHighlighter(mm, ranges.get(i), data));
+      }
+    });
+
+    data.highlighters = newHighlighters;
+  }
+
+  public void doApplyPropertyInformationToEditor(WidgetIndentsPassData data) {
+    /*
+    final MarkupModel mm = myEditor.getMarkupModel();
+
+    final List<RangeHighlighter> oldHighlighters = data.propertyHighlighters;
+    final List<RangeHighlighter> newHighlighters = new ArrayList<>();
+
+    int curRange = 0;
+
+    final List<TextRangeDescriptorPair> ranges = data.myRangesWidgets;
+    if (oldHighlighters != null) {
+      // after document change some range highlighters could have become
+      // invalid, or the order could have been broken.
+      // This is similar to logic in FliteredIndentsHighlightingPass.java that also attempts to
+      // only update highlighters that have actually changed.
+      oldHighlighters.sort(Comparator.comparing((RangeHighlighter h) -> !h.isValid())
+                             .thenComparing(Segment.BY_START_OFFSET_THEN_END_OFFSET));
+      int curHighlight = 0;
+      // It is fine if we cleanupHighlighters and update some old highlighters that are
+      // still valid but it is not ok if we leave even one highlighter that
+      // really changed as that will cause rendering artifacts.
+      while (curRange < ranges.size() && curHighlight < oldHighlighters.size()) {
+        final TextRangeDescriptorPair entry = ranges.get(curRange);
+        final RangeHighlighter highlighter = oldHighlighters.get(curHighlight);
+
+        if (!highlighter.isValid()) break;
+
+        final int cmp = compare(entry, highlighter);
+        if (cmp < 0) {
           newHighlighters.add(createHighlighter(mm, entry));
           curRange++;
         }
@@ -655,6 +901,7 @@ public class WidgetIndentsHighlightingPass {
       }
     }
 
+
     final int startRangeIndex = curRange;
     assert myDocument != null;
     DocumentUtil.executeInBulk(myDocument, ranges.size() > 10000, () -> {
@@ -664,6 +911,8 @@ public class WidgetIndentsHighlightingPass {
     });
 
     data.highlighters = newHighlighters;
+
+     */
   }
 
   DartAnalysisServerService getAnalysisService() {
@@ -695,6 +944,14 @@ public class WidgetIndentsHighlightingPass {
     return new OutlineLocation(node, line, column, indent, myFile, getAnalysisService());
   }
 
+  DartCallExpression getCallExpression(PsiElement element) {
+    if (element == null) { return null; }
+    if (element instanceof DartCallExpression) {
+      return (DartCallExpression) element;
+    }
+
+    return getCallExpression(element.getParent());
+  }
   private void buildWidgetDescriptors(
     final List<WidgetIndentGuideDescriptor> widgetDescriptors,
     FlutterOutline outlineNode,
@@ -702,33 +959,96 @@ public class WidgetIndentsHighlightingPass {
   ) {
     if (outlineNode == null) return;
 
+    if (StringUtil.equals(outlineNode.getClassName(), "ExpandingBottomSheet")) {
+      System.out.println("XXX BOTTOM");
+    }
     final String kind = outlineNode.getKind();
-    final boolean widgetConstructor = "NEW_INSTANCE".equals(kind);
+    final boolean widgetConstructor = "NEW_INSTANCE".equals(kind) || (parent != null && ("VARIABLE".equals(kind)));
 
     final List<FlutterOutline> children = outlineNode.getChildren();
-    if (children == null || children.isEmpty()) return;
+//    if (children == null || children.isEmpty()) return;
 
     if (widgetConstructor) {
       final OutlineLocation location = computeLocation(outlineNode);
-
       int minChildIndent = Integer.MAX_VALUE;
       final ArrayList<OutlineLocation> childrenLocations = new ArrayList<>();
       int endLine = location.getLine();
-      for (FlutterOutline child : children) {
-        final OutlineLocation childLocation = computeLocation(child);
-        if (childLocation.getLine() <= location.getLine()) {
-          // Skip children that don't actually occur on a later line. There is no
-          // way for us to draw good looking line art for them.
-          // TODO(jacobr): consider adding these children anyway so we can render
-          // them if there are edits and they are now properly formatted.
-          continue;
-        }
 
-        minChildIndent = min(minChildIndent, childLocation.getIndent());
-        endLine = max(endLine, childLocation.getLine());
-        childrenLocations.add(childLocation);
+      if (children != null) {
+        for (FlutterOutline child : children) {
+          final OutlineLocation childLocation = computeLocation(child);
+          if (childLocation.getLine() <= location.getLine()) {
+            // Skip children that don't actually occur on a later line. There is no
+            // way for us to draw good looking line art for them.
+            // TODO(jacobr): consider adding these children anyway so we can render
+            // them if there are edits and they are now properly formatted.
+            continue;
+          }
+
+          minChildIndent = min(minChildIndent, childLocation.getIndent());
+          endLine = max(endLine, childLocation.getLine());
+          childrenLocations.add(childLocation);
+        }
       }
-      if (!childrenLocations.isEmpty()) {
+      Set<Integer> childrenOffsets = new HashSet<Integer>();
+      for (OutlineLocation childLocation : childrenLocations) {
+        childrenOffsets.add(childLocation.getOffset());
+      }
+
+      final PsiElement element=  psiFile.findElementAt(location.getOffset());
+      ArrayList<WidgetIndentGuideDescriptor.WidgetPropertyDescriptor> trustedAttributes = new ArrayList<>();
+      final DartCallExpression callExpression = getCallExpression(element);
+      if (callExpression != null) {
+        final DartArguments arguments = callExpression.getArguments();
+        Map<String, DartExpression> foundParameters = new HashMap<>();
+
+        final List<FlutterOutlineAttribute> attributes = outlineNode.getAttributes();
+        if (arguments != null) {
+          final DartArgumentList argumentsList = arguments.getArgumentList();
+          if (argumentsList != null) {
+            final List<DartNamedArgument> namedArguments = argumentsList.getNamedArgumentList();
+            for (DartNamedArgument argument : namedArguments) {
+              DartExpression parameter = argument.getParameterReferenceExpression();
+              DartExpression value = argument.getExpression();
+              String parameterName = parameter.getText();
+              if (childrenOffsets.contains(argument.getExpression().getTextOffset())) {
+                //  System.out.println("XXX SKIPPING parameter=value " + parameter.getText() + "==>" + value.getText());
+              }
+              else {
+                // System.out.println("XXX showing parameter=value " + parameter.getText() + "==>" + value.getText());
+                foundParameters.put(parameter.getText(), value);
+              }
+            }
+            // TODO(jacobr): handle non-named arguments as well.
+            int i = 0;
+            for (DartExpression argument : argumentsList.getExpressionList()) {
+              if (attributes == null || attributes.size() <= i) {
+                System.out.println("XXX Missing argument=" + argument);
+              } else {
+                foundParameters.put(attributes.get(i).getName(), argument);
+                i++;
+              }
+            }
+          }
+        }
+        if (attributes != null) {
+          for (FlutterOutlineAttribute attribute : attributes) {
+            final String name = attribute.getName();
+            final DartExpression parameterExpression = foundParameters.get(name);
+            if (parameterExpression != null) {
+              //            System.out.println("XXX found parameter: " + name + ": " +element.getText());
+              trustedAttributes.add(new WidgetIndentGuideDescriptor.WidgetPropertyDescriptor(name, parameterExpression, attribute));
+            }
+            else {
+//              System.out.println("XXX missing parameter: " + attribute.getName());
+              // XXX revisit.
+            }
+          }
+        }
+      }
+
+      // XXX if (!childrenLocations.isEmpty())
+      {
         // The indent is only used for sorting and disambiguating descriptors
         // as at render time we will pick the real indent for the outline based
         // on local edits that may have been made since the outline was computed.
@@ -739,21 +1059,25 @@ public class WidgetIndentsHighlightingPass {
           location.getLine(),
           endLine + 1,
           childrenLocations,
-          location
+          location,
+          trustedAttributes
         );
-        if (!descriptor.childLines.isEmpty()) {
+        // if (!descriptor.childLines.isEmpty())
+        {
           widgetDescriptors.add(descriptor);
           parent = descriptor;
         }
       }
     }
-    for (FlutterOutline child : children) {
-      buildWidgetDescriptors(widgetDescriptors, child, parent);
+    if (children != null) {
+      for (FlutterOutline child : children) {
+        buildWidgetDescriptors(widgetDescriptors, child, parent);
+      }
     }
   }
 
   @NotNull
-  private RangeHighlighter createHighlighter(MarkupModel mm, TextRangeDescriptorPair entry) {
+  private RangeHighlighter createHighlighter(MarkupModel mm, TextRangeDescriptorPair entry, WidgetIndentsPassData data) {
     final TextRange range = entry.range;
     final FlutterSettings settings = FlutterSettings.getInstance();
     if (range.getEndOffset() >= myDocument.getTextLength() && DEBUG_WIDGET_INDENTS) {
@@ -772,9 +1096,31 @@ public class WidgetIndentsHighlightingPass {
       highlighter.setErrorStripeTooltip("Flutter build method");
       highlighter.setThinErrorStripeMark(true);
     }
-    highlighter.setCustomRenderer(new WidgetCustomHighlighterRenderer(entry.descriptor, myDocument));
+    highlighter.setCustomRenderer(new WidgetCustomHighlighterRenderer(entry.descriptor, myDocument, data));
     return highlighter;
   }
+
+  /*
+  @NotNull
+  private RangeHighlighter createPropertyHighlighter(MarkupModel mm, TextRangeDescriptorPair entry) {
+    final TextRange range = entry.range;
+    final FlutterSettings settings = FlutterSettings.getInstance();
+    if (range.getEndOffset() >= myDocument.getTextLength() && DEBUG_WIDGET_INDENTS) {
+      LOG.info("Warning: highlighter extends past the end of document.");
+    }
+    final RangeHighlighter highlighter =
+      mm.addRangeHighlighter(
+        Math.max(range.getStartOffset(), 0),
+        Math.min(range.getEndOffset(), myDocument.getTextLength()),
+        HighlighterLayer.FIRST,
+        null,
+        HighlighterTargetArea.EXACT_RANGE
+      );
+    highlighter.setCustomRenderer(new PropertyValueRenderer(entry.descriptor, myDocument));
+    return highlighter;
+  }
+
+   */
 }
 
 /**
@@ -782,6 +1128,7 @@ public class WidgetIndentsHighlightingPass {
  * multiple runs of the WidgetIndentsHighlightingPass.
  */
 class WidgetIndentsPassData {
+  public Rectangle visibleRect;
   /**
    * Descriptors describing the data model to render the widget indents.
    * <p>
@@ -801,6 +1148,9 @@ class WidgetIndentsPassData {
    * guides.
    */
   List<RangeHighlighter> highlighters;
+
+  /// XXX remove
+  // List<RangeHighlighter> propertyHighlighters;
 
   /**
    * Source of truth for whether other UI overlaps with the widget indents.

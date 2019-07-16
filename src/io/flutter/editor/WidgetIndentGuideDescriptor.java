@@ -6,8 +6,12 @@
 package io.flutter.editor;
 
 import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.editor.RangeMarker;
+import com.jetbrains.lang.dart.psi.DartExpression;
+import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
 
 import java.util.ArrayList;
+import java.util.Map;
 
 /**
  * Analog to the IndentGuideDescriptor class from the regular FliteredIndentsHighlightingPass.
@@ -22,20 +26,82 @@ import java.util.ArrayList;
  * edited as there will be a slight delay before new analysis data is available.
  */
 public class WidgetIndentGuideDescriptor {
+  public static class WidgetPropertyDescriptor {
+    private RangeMarker marker;
+    private final DartExpression dartExpression;
+    private final String name;
+    private final FlutterOutlineAttribute attribute;
+
+    WidgetPropertyDescriptor(String name, DartExpression dartExpression, FlutterOutlineAttribute attribute) {
+      this.dartExpression = dartExpression;
+      this.name = name;
+      this.attribute = attribute;
+    }
+
+    public String getName() { return name;}
+
+    public FlutterOutlineAttribute getAttribute() {
+      return attribute;
+    }
+
+    public int getEndOffset() {
+      if (marker == null) {
+        return dartExpression.getTextOffset() + dartExpression.getTextLength();
+      }
+      return marker.getEndOffset();
+    }
+
+    public void track(Document document) {
+      if (marker != null) {
+        // TODO(jacobr): it does indicate a bit of a logic bug if we are calling this method twice.
+        assert (marker.getDocument() == document);
+        return;
+      }
+
+      // Create a range marker that goes from the start of the indent for the line
+      // to the column of the actual entity.
+      final int docLength = document.getTextLength();
+      int startOffset = dartExpression.getTextOffset();
+      startOffset = Math.min(startOffset, docLength);
+      final int endOffset = Math.min(startOffset + dartExpression.getTextLength(), docLength);
+
+      marker = document.createRangeMarker(startOffset, endOffset);
+//      nodeStartingWord = OutlineLocation.getCurrentWord(document, nameExpression);
+    }
+
+    public void dispose() {
+      if (marker != null) {
+        marker.dispose();
+      }
+    }
+  }
+
   public final WidgetIndentGuideDescriptor parent;
   public final ArrayList<OutlineLocation> childLines;
   public final OutlineLocation widget;
   public final int indentLevel;
   public final int startLine;
   public final int endLine;
+  public final ArrayList<WidgetPropertyDescriptor> properties;
 
-  public WidgetIndentGuideDescriptor(WidgetIndentGuideDescriptor parent, int indentLevel, int startLine, int endLine, ArrayList<OutlineLocation> childLines, OutlineLocation widget) {
+  public WidgetIndentGuideDescriptor nextSibling;
+
+  public WidgetIndentGuideDescriptor(
+    WidgetIndentGuideDescriptor parent,
+    int indentLevel,
+    int startLine,
+    int endLine,
+    ArrayList<OutlineLocation> childLines,
+    OutlineLocation widget,
+    ArrayList<WidgetPropertyDescriptor> properties
+  ) {
     this.parent = parent;
     this.childLines = childLines;
     this.widget = widget;
     this.indentLevel = indentLevel;
     this.startLine = startLine;
     this.endLine = endLine;
+    this.properties = properties;
   }
 
   void dispose() {
@@ -46,6 +112,10 @@ public class WidgetIndentGuideDescriptor {
     for (OutlineLocation childLine : childLines) {
       childLine.dispose();
     }
+    for (WidgetPropertyDescriptor property : properties) {
+      property.dispose();
+    }
+
     childLines.clear();
   }
 
@@ -65,6 +135,9 @@ public class WidgetIndentGuideDescriptor {
     for (OutlineLocation childLine : childLines) {
       childLine.track(document);
     }
+    for (WidgetPropertyDescriptor property : properties) {
+      property.track(document);
+    }
   }
 
   @Override
@@ -80,6 +153,7 @@ public class WidgetIndentGuideDescriptor {
     if (widget != null) {
       result = 31 * result + widget.hashCode();
     }
+    // XXX add properties.
     return result;
   }
 
@@ -101,6 +175,7 @@ public class WidgetIndentGuideDescriptor {
     if (childLines.size() != that.childLines.size()) {
       return false;
     }
+    // XXX add properties.
 
     for (int i = 0; i < childLines.size(); ++i) {
       if (childLines.get(i).equals(that.childLines.get(i))) {

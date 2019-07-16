@@ -39,7 +39,7 @@ public class OutlineLocation implements Comparable<OutlineLocation> {
    * where RangeMarkers go off the rails and return strange values after
    * running a code formatter or other tool that generates widespread edits.
    */
-  private static String getCurrentWord(Document document, int offset) {
+  public static String getCurrentWord(Document document, int offset) {
     final int documentLength = document.getTextLength();
     if (offset < 0 || offset >= documentLength) return "";
     final CharSequence chars = document.getCharsSequence();
