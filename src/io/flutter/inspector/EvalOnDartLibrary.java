@@ -140,31 +140,48 @@ public class EvalOnDartLibrary implements Disposable {
     // TODO(jacobr): complete all pending futures as cancelled?
   }
 
-  public CompletableFuture<JsonObject> invokeServiceMethod(String method) {
+  public CompletableFuture<JsonObject> invokeServiceMethod(String method, JsonObject params) {
     CompletableFuture<JsonObject> ret = new CompletableFuture<>();
-    libraryRef.whenCompleteAsync((value, ex) -> {
-      if (ex != null) {
-        ret.completeExceptionally(ex);
+    vmService.callServiceExtension(isolateId, method, params, new ServiceExtensionConsumer() {
+
+      @Override
+      public void onError(RPCError error) {
+        ret.completeExceptionally(new RuntimeException(error.getMessage()));
       }
-      vmService.callServiceExtension(isolateId, method, new ServiceExtensionConsumer() {
 
-        @Override
-        public void onError(RPCError error) {
-          ret.completeExceptionally(new RuntimeException(error.getMessage()));
-        }
-
-        @Override
-        public void received(JsonObject object) {
-          ret.complete(object);
-        }
-      });
+      @Override
+      public void received(JsonObject object) {
+        ret.complete(object);
+      }
     });
     return ret;
   }
 
-  public CompletableFuture<BufferedImage> getScreenshot() {
-    return invokeServiceMethod("_flutter.screenshot").thenApplyAsync((JsonObject response) -> {
-      final String imageString = response.get("screenshot").getAsString();
+  public CompletableFuture<JsonObject> invokeServiceMethod(String method) {
+    CompletableFuture<JsonObject> ret = new CompletableFuture<>();
+    vmService.callServiceExtension(isolateId, method, new ServiceExtensionConsumer() {
+
+      @Override
+      public void onError(RPCError error) {
+        ret.completeExceptionally(new RuntimeException(error.getMessage()));
+      }
+
+      @Override
+      public void received(JsonObject object) {
+        ret.complete(object);
+      }
+    });
+    return ret;
+  }
+
+  public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef ref, int width, int height) {
+    JsonObject params = new JsonObject();
+    params.addProperty("width", width);
+    params.addProperty("height", height);
+    params.addProperty("id", ref.getId());
+
+    return invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
+      final String imageString = response.get("result").getAsString();
       // create a buffered image
       byte[] imageBytes;
       final BASE64Decoder decoder = new BASE64Decoder();

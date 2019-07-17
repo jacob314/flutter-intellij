@@ -184,8 +184,8 @@ public class InspectorService implements Disposable {
     setPubRootDirectoriesSubscription.dispose();
   }
 
-  public CompletableFuture<BufferedImage> getScreenshot() {
-    return inspectorLibrary.getScreenshot();
+  public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef ref, int width, int height) {
+    return inspectorLibrary.getScreenshot(ref, width, height);
   }
 
   public CompletableFuture<?> forceRefresh() {

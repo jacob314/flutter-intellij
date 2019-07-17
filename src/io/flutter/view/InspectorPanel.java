@@ -831,9 +831,11 @@ public class InspectorPanel extends JPanel implements Disposable, InspectorServi
     }
 
     ArrayList<CompletableFuture<?>> futures = new ArrayList<>();
-    if (imageComponent != null && mirrorToolWindow != null && mirrorToolWindow.isVisible()) {
+    if (imageComponent != null && mirrorToolWindow != null && mirrorToolWindow.isVisible() && getSelectedDiagnostic() != null &&  getSelectedDiagnostic().getValueRef() != null) {
       // XXX need to refresh mirrorToolWindow when it becomes visible.
-      CompletableFuture<BufferedImage> screenshotFuture = getInspectorService().getScreenshot();
+
+
+      CompletableFuture<BufferedImage> screenshotFuture = getInspectorService().getScreenshot( getSelectedDiagnostic().getValueRef(), mirrorToolWindow.getComponent().getWidth(), mirrorToolWindow.getComponent().getHeight());
       futures.add(screenshotFuture);
       AsyncUtils.whenCompleteUiThread(screenshotFuture, (image, error) -> {
         long timeDelta = System.currentTimeMillis() - startTime;
