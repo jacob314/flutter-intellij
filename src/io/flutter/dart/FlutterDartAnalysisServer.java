@@ -137,6 +137,34 @@ public class FlutterDartAnalysisServer {
     return result.get();
   }
 
+
+  @Nullable
+  public SourceChange flutter_getChangeAddForDesignTimeConstructor(@NotNull VirtualFile file, int _offset) {
+    final String filePath = FileUtil.toSystemDependentName(file.getPath());
+    final int offset = analysisService.getOriginalOffset(file, _offset);
+
+    final CountDownLatch latch = new CountDownLatch(1);
+    final AtomicReference<SourceChange> result = new AtomicReference<>();
+    final String id = analysisService.generateUniqueId();
+    responseConsumers.put(id, (resultObject) -> {
+      try {
+        final JsonObject changeObject = resultObject.getAsJsonObject("change");
+        final SourceChange change = SourceChange.fromJson(changeObject);
+        result.set(change);
+      }
+      catch (Throwable ignored) {
+      }
+      latch.countDown();
+    });
+
+    final JsonObject request = FlutterRequestUtilities.generateFlutterGetChangeAddForDesignTimeConstructor(id, filePath, offset);
+    analysisService.sendRequest(id, request);
+
+    Uninterruptibles.awaitUninterruptibly(latch, 100, TimeUnit.MILLISECONDS);
+    return result.get();
+  }
+
+
   private void processString(String jsonString) {
     processResponse(new Gson().fromJson(jsonString, JsonObject.class));
   }

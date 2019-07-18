@@ -72,6 +72,27 @@ public class FlutterRequestUtilities {
     return buildJsonObjectRequest(id, METHOD_FLUTTER_SET_SUBSCRIPTIONS, params);
   }
 
+  /**
+   * Generate and return a {@value #METHOD_FLUTTER_GET_CHANGE_ADD_FOR_DESIGN_TIME_CONSTRUCTOR} request.
+   * <p>
+   * <pre>
+   * request: {
+   *   "id": String
+   *   "method": "flutter.getChangeAddForDesignTimeConstructor"
+   *   "params": {
+   *     "file": FilePath
+   *     "offset": int
+   *   }
+   * }
+   * </pre>
+   */
+  public static JsonObject generateFlutterGetChangeAddForDesignTimeConstructor(String id, String file, int offset) {
+    final JsonObject params = new JsonObject();
+    params.addProperty(FILE, file);
+    params.addProperty(OFFSET, offset);
+    return buildJsonObjectRequest(id, METHOD_FLUTTER_GET_CHANGE_ADD_FOR_DESIGN_TIME_CONSTRUCTOR, params);
+  }
+
   @NotNull
   private static JsonElement buildJsonElement(Object object) {
     if (object instanceof Boolean) {
