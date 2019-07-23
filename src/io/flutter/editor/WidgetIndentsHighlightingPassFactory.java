@@ -28,15 +28,20 @@ import com.intellij.psi.PsiFile;
 import io.flutter.FlutterUtils;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
-import io.flutter.perf.FlutterWidgetPerfManager;
+import io.flutter.inspector.DiagnosticsNode;
+import io.flutter.inspector.InspectorObjectGroupManager;
+import io.flutter.inspector.InspectorService;
+import io.flutter.run.daemon.FlutterApp;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.AsyncUtils;
+import io.flutter.view.FlutterViewMessages;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
+import org.dartlang.vm.service.VmService;
 import org.jetbrains.annotations.NotNull;
 
-import java.awt.*;
-import java.awt.event.MouseEvent;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Factory that drives all rendering of widget indents.
@@ -85,6 +90,12 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
     }
   };
 
+  private CompletableFuture<InspectorService> inspectorServiceFuture;
+  private InspectorService inspectorService;
+  private FlutterApp app;
+  private FlutterApp.FlutterAppListener appListener;
+  private DiagnosticsNode selection;
+
   EditorEx getIfValidForProject(Editor editor) {
     if (editor.getProject() != project) return null;
     if (editor.isDisposed() || project.isDisposed()) return null;
@@ -123,18 +134,24 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
         final EditorEx editorEx = getIfValidForProject(event.getEditor());
         if (editorEx == null) return;
         WidgetIndentsHighlightingPass.onMousePressed(editorEx, event.getMouseEvent());
-        /*
-
-        if (event.getSource() instanceof TextEditor) {
-          final TextEditor editor = (TextEditor) event.getSource();
-          if (event.getArea().equals(EditorMouseEventArea.EDITING_AREA)) {
-            MouseEvent m = event.getMouseEvent();
-            System.out.println("XXX absolute:" + m.getX() + ", " + m.getY());
-            System.out.println("XXX onScreen" + m.getXOnScreen() + ", " + m.getYOnScreen());
-          }
-        }*/
       }
+
+      @Override
+      public void mouseEntered(@NotNull EditorMouseEvent event) {
+        final EditorEx editorEx = getIfValidForProject(event.getEditor());
+        if (editorEx == null) return;
+        WidgetIndentsHighlightingPass.onMouseEntered(editorEx, event.getMouseEvent());
+      }
+
+      @Override
+      public void mouseExited(@NotNull EditorMouseEvent event) {
+        final EditorEx editorEx = getIfValidForProject(event.getEditor());
+        if (editorEx == null) return;
+        WidgetIndentsHighlightingPass.onMouseExited(editorEx, event.getMouseEvent());
+      }
+
     }, this);
+
     eventMulticaster.addCaretListener(new CaretListener() {
       @Override
       public void caretPositionChanged(@NotNull CaretEvent event) {
@@ -149,6 +166,135 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
         updateActiveEditors();
       }
     });
+
+    project.getMessageBus().connect().subscribe(
+      FlutterViewMessages.FLUTTER_DEBUG_TOPIC, (event) -> {
+        updateActiveApp(event.app);
+      }
+    );
+
+  }
+
+  boolean started = false;
+  private InspectorObjectGroupManager selectionGroups;
+
+  private void requestRepaint(boolean force) {
+    AsyncUtils.invokeLater(() -> {
+      for (EditorEx editor : getActiveDartEditors()) {
+        WidgetIndentsHighlightingPass.onInspectorDataChange(editor, force);
+      }
+    });
+  }
+
+  private void loadSelection() {
+    selectionGroups.cancelNext();
+
+    final CompletableFuture<DiagnosticsNode> pendingSelectionFuture =
+      selectionGroups.getNext().getSelection(null, InspectorService.FlutterTreeType.widget, true);
+    selectionGroups.getNext().safeWhenComplete(pendingSelectionFuture, (selection, error) -> {
+      if (error != null) {
+        //                  FlutterUtils.warn(LOG, error);
+        selectionGroups.cancelNext();
+        return;
+      }
+
+      selectionGroups.promoteNext();
+      onSelectionChanged(selection);
+    });
+  }
+
+  private void updateActiveApp(FlutterApp app) {
+    if (this.app != null) {
+      this.app.removeStateListener(appListener);
+      this.app = null;
+      appListener = null;
+    }
+    this.app = app;
+    started = false;
+    // start listening for frames, reload and restart events
+    appListener = new FlutterApp.FlutterAppListener() {
+
+      @Override
+      public void stateChanged(FlutterApp.State newState) {
+        if (!started && app.isStarted()) {
+          started = true;
+          requestRepaint(false); // XXX when is this called? Probably force=true
+        }
+      }
+
+      @Override
+      public void notifyAppReloaded() {
+        requestRepaint(true);
+      }
+
+      @Override
+      public void notifyAppRestarted() {
+        requestRepaint(true);
+      }
+
+      @Override
+      public void notifyFrameRendered() {
+        // requestRepaint(false);
+      }
+
+      public void notifyVmServiceAvailable(VmService vmService) {
+        // XXX run this method on the main thread.
+ //       setupConnection(vmService);
+        inspectorServiceFuture = app.getFlutterDebugProcess().getInspectorService();
+        AsyncUtils.whenCompleteUiThread(inspectorServiceFuture, (service, error) -> {
+          if (inspectorServiceFuture == null || inspectorServiceFuture.getNow(null) != service) return;
+          inspectorService = service;
+          selection = null;
+          selectionGroups = new InspectorObjectGroupManager(inspectorService, "selection");
+          loadSelection();
+
+          if (app != WidgetIndentsHighlightingPassFactory.this.app) return;
+          for (EditorEx editor : getActiveDartEditors()) {
+            WidgetIndentsHighlightingPass.onInspectorAvaiable(editor, service);
+          }
+          service.addClient(new InspectorService.InspectorServiceClient() {
+            @Override
+            public void onInspectorSelectionChanged(boolean uiAlreadyUpdated, boolean textEditorUpdated) {
+              loadSelection();
+            }
+
+            @Override
+            public void onFlutterFrame() {
+              // requestRepaint(false); // XXX too much.
+            }
+            @Override
+            public CompletableFuture<?> onForceRefresh() {
+              requestRepaint(true); // XXX don't need a full repaint.
+              return null;
+            }
+          });
+        });
+
+      }
+    };
+
+    app.addStateListener(appListener);
+    if (app.getFlutterDebugProcess() != null) {
+      appListener.notifyVmServiceAvailable(null);
+    }
+/*
+    AsyncUtils.invokeLater(() -> {
+      for (EditorEx editor : getActiveDartEditors()) {
+        WidgetIndentsHighlightingPass.onAppChanged(editor, app);
+      }
+    });
+
+ */
+  }
+
+  private void onSelectionChanged(DiagnosticsNode selection) {
+    this.selection = selection;
+    AsyncUtils.invokeLater(() -> {
+      for (EditorEx editor : getActiveDartEditors()) {
+        WidgetIndentsHighlightingPass.onSelectionChanged(editor, selection);
+      }
+    });
+    requestRepaint(false);
   }
 
   List<EditorEx> getActiveDartEditors() {
@@ -172,7 +318,7 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
     synchronized (outlineListeners) {
       for (Map.Entry<String, FlutterOutlineListener> entry : outlineListeners.entrySet()) {
         final String path = entry.getKey();
-        final FlutterOutlineListener listener = outlineListeners.remove(path);
+        final FlutterOutlineListener listener = entry.getValue();
         if (listener != null) {
           flutterDartAnalysisService.removeOutlineListener(path, listener);
         }
@@ -350,7 +496,7 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
     }
 
 // XXX    FlutterWidgetPerfManager perfManager = FlutterWidgetPerfManager.getInstance(project);
-    WidgetIndentsHighlightingPass.run(project, editor, outline);
+    WidgetIndentsHighlightingPass.run(project, editor, outline, flutterDartAnalysisService, inspectorService);
   }
 
   @Override

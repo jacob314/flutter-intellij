@@ -23,8 +23,12 @@ import io.flutter.vmService.frame.DartVmServiceValue;
 import org.dartlang.vm.service.VmService;
 import org.dartlang.vm.service.element.*;
 import org.jetbrains.annotations.NotNull;
+import sun.misc.BASE64Decoder;
 
+import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -184,9 +188,12 @@ public class InspectorService implements Disposable {
     setPubRootDirectoriesSubscription.dispose();
   }
 
+  /*
   public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef ref, int width, int height) {
-    return inspectorLibrary.getScreenshot(ref, width, height);
+    return createObjectGroup("screenshots").getScreenshot(ref, width, height);
   }
+
+   */
 
   public CompletableFuture<?> forceRefresh() {
     final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -199,10 +206,10 @@ public class InspectorService implements Disposable {
     return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
   }
 
-  private void notifySelectionChanged() {
+  private void notifySelectionChanged(boolean uiAlreadyUpdated, boolean textEditorUpdated) {
     ApplicationManager.getApplication().invokeLater(() -> {
       for (InspectorServiceClient client : clients) {
-        client.onInspectorSelectionChanged();
+        client.onInspectorSelectionChanged(uiAlreadyUpdated, textEditorUpdated);
       }
     });
   }
@@ -220,9 +227,9 @@ public class InspectorService implements Disposable {
 
           // We create a dummy object group as this particular operation
           // doesn't actually require an object group.
-          createObjectGroup("dummy").setSelection(event.getInspectee(), true);
+          createObjectGroup("dummy").setSelection(event.getInspectee(), true, true);
           // Update the UI in IntelliJ.
-          notifySelectionChanged();
+          notifySelectionChanged(false, false);
         }
         break;
       }
@@ -413,6 +420,9 @@ public class InspectorService implements Disposable {
      */
     @Override
     public void dispose() {
+      if (disposed) {
+        return;
+      }
       lock.writeLock().lock();
       invokeVoidServiceMethod("disposeGroup", groupName);
       disposed = true;
@@ -564,6 +574,100 @@ public class InspectorService implements Disposable {
       return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("inspectAt", x, y, groupName));
     }
 
+    public CompletableFuture<ArrayList<DiagnosticsNode>> getElementsAtLocation(String file, int line, int column, int count) {
+      final JsonObject params = new JsonObject();
+      params.addProperty("file", file);
+      params.addProperty("line", line);
+      params.addProperty("column", column);
+      params.addProperty("count", count);
+      params.addProperty("groupName", groupName);
+
+      return parseDiagnosticsNodesDaemon(
+        inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.getElementsAtLocation", params).thenApplyAsync((o) -> {
+          if (o == null) return null;
+          return o.get("result");
+        }), null );
+    }
+
+    public CompletableFuture<ArrayList<DiagnosticsNode>> getBoundingBoxes(DiagnosticsNode root, DiagnosticsNode target) {
+      final JsonObject params = new JsonObject();
+      if (root == null || target ==null || root.getValueRef() == null || target.getValueRef() == null) {
+        return CompletableFuture.completedFuture(new ArrayList<>());
+      }
+      params.addProperty("rootId", root.getValueRef().getId());
+      params.addProperty("targetId", target.getValueRef().getId());
+      params.addProperty("groupName", groupName);
+
+      return parseDiagnosticsNodesDaemon(
+        inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.getBoundingBoxes", params).thenApplyAsync((o) -> {
+          if (o == null) return null;
+          return  o.get("result");
+        }), null );
+    }
+
+    public CompletableFuture<ArrayList<DiagnosticsNode>> hitTest(DiagnosticsNode root, double dx, double dy, String file, int startLine, int endLine) {
+      final JsonObject params = new JsonObject();
+      if (root == null || root.getValueRef() == null ) {
+        return CompletableFuture.completedFuture(new ArrayList<>());
+      }
+      params.addProperty("id", root.getValueRef().getId());
+      params.addProperty("dx", dx);
+      params.addProperty("dy", dy);
+      if (file != null)
+      params.addProperty("file", file);
+
+      if (startLine >= 0 && endLine >= 0) {
+        params.addProperty("startLine", startLine);
+        params.addProperty("endLine", endLine);
+      }
+
+      params.addProperty("groupName", groupName);
+
+      return parseDiagnosticsNodesDaemon(
+        inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.hitTest", params).thenApplyAsync((o) -> {
+          if (o == null) return null;
+          return o.get("result");
+        }), null );
+    }
+
+    public CompletableFuture<Screenshot> getScreenshot(InspectorInstanceRef ref, int width, int height, double maxPixelRatio) {
+      final JsonObject params = new JsonObject();
+      params.addProperty("width", width);
+      params.addProperty("height", height);
+      params.addProperty("maxPixelRatio", maxPixelRatio);
+      params.addProperty("id", ref.getId());
+
+      return inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
+        if (response == null || response.get("result").isJsonNull()) {
+          System.out.println("XXX invalid json");
+          return null;
+        }
+        final JsonObject result = response.getAsJsonObject("result");
+        final String imageString = result.getAsJsonPrimitive("image").getAsString();
+        // create a buffered image
+        final byte[] imageBytes;
+        final BASE64Decoder decoder = new BASE64Decoder();
+        try {
+          imageBytes = decoder.decodeBuffer(imageString);
+        }
+        catch (IOException e) {
+          throw new RuntimeException("Error decoding base64 data: " + e.getMessage());
+        }
+        final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
+        BufferedImage image = null;
+        try {
+          image = ImageIO.read(byteArrayInputStream);
+          byteArrayInputStream.close();
+        }
+        catch (IOException e) {
+          throw new RuntimeException("Error decoding image: " + e.getMessage());
+        }
+
+        final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
+        return new Screenshot(image, transformedRect);
+      });
+    }
+
     public CompletableFuture<DiagnosticsNode> hoverAt(double x, double y) {
       // TODO(jacobr): support observatory protocol as well. XXX
       return parseDiagnosticsNodeDaemon(invokeServiceMethodDaemon("hoverAt", x, y, groupName));
@@ -709,7 +813,7 @@ public class InspectorService implements Disposable {
     }
 
     ArrayList<DiagnosticsNode> parseDiagnosticsNodesHelper(JsonElement jsonObject, DiagnosticsNode parent) {
-      return parseDiagnosticsNodesHelper(jsonObject != null ? jsonObject.getAsJsonArray() : null, parent);
+      return parseDiagnosticsNodesHelper(jsonObject != null && !jsonObject.isJsonNull() ? jsonObject.getAsJsonArray() : null, parent);
     }
 
     ArrayList<DiagnosticsNode> parseDiagnosticsNodesHelper(JsonArray jsonArray, DiagnosticsNode parent) {
@@ -928,15 +1032,15 @@ public class InspectorService implements Disposable {
       });
     }
 
-    public void setSelection(InspectorInstanceRef selection, boolean uiAlreadyUpdated) {
+    public void setSelection(InspectorInstanceRef selection, boolean uiAlreadyUpdated, boolean textEditorUpdated) {
       if (disposed) {
         return;
       }
       if (useDaemonApi()) {
-        handleSetSelectionDaemon(invokeServiceMethodDaemon("setSelectionById", selection), uiAlreadyUpdated);
+        handleSetSelectionDaemon(invokeServiceMethodDaemon("setSelectionById", selection), uiAlreadyUpdated, textEditorUpdated);
       }
       else {
-        handleSetSelectionObservatory(invokeServiceMethodObservatory("setSelectionById", selection), uiAlreadyUpdated);
+        handleSetSelectionObservatory(invokeServiceMethodObservatory("setSelectionById", selection), uiAlreadyUpdated, textEditorUpdated);
       }
     }
 
@@ -944,31 +1048,31 @@ public class InspectorService implements Disposable {
      * Helper when we need to set selection given an observatory InstanceRef
      * instead of an InspectorInstanceRef.
      */
-    public void setSelection(InstanceRef selection, boolean uiAlreadyUpdated) {
+    public void setSelection(InstanceRef selection, boolean uiAlreadyUpdated, boolean textEditorUpdated) {
       // There is no excuse for calling setSelection using a disposed ObjectGroup.
       assert (!disposed);
       // This call requires the observatory protocol as an observatory InstanceRef is specified.
-      handleSetSelectionObservatory(invokeServiceMethodOnRefObservatory("setSelection", selection), uiAlreadyUpdated);
+      handleSetSelectionObservatory(invokeServiceMethodOnRefObservatory("setSelection", selection), uiAlreadyUpdated, textEditorUpdated);
     }
 
-    private void handleSetSelectionObservatory(CompletableFuture<InstanceRef> setSelectionResult, boolean uiAlreadyUpdated) {
+    private void handleSetSelectionObservatory(CompletableFuture<InstanceRef> setSelectionResult, boolean uiAlreadyUpdated, boolean textEditorUpdated) {
       // TODO(jacobr): we need to cancel if another inspect request comes in while we are trying this one.
       skipIfDisposed(() -> setSelectionResult.thenAcceptAsync((InstanceRef instanceRef) -> skipIfDisposed(() -> {
-        handleSetSelectionHelper("true".equals(instanceRef.getValueAsString()), uiAlreadyUpdated);
+        handleSetSelectionHelper("true".equals(instanceRef.getValueAsString()), uiAlreadyUpdated, textEditorUpdated);
       })));
     }
 
-    private void handleSetSelectionHelper(boolean selectionChanged, boolean uiAlreadyUpdated) {
-      if (selectionChanged && !uiAlreadyUpdated) {
-        notifySelectionChanged();
+    private void handleSetSelectionHelper(boolean selectionChanged, boolean uiAlreadyUpdated, boolean textEditorUpdated) {
+      if (selectionChanged) {
+        notifySelectionChanged(uiAlreadyUpdated, textEditorUpdated);
       }
     }
 
-    private void handleSetSelectionDaemon(CompletableFuture<JsonElement> setSelectionResult, boolean uiAlreadyUpdated) {
+    private void handleSetSelectionDaemon(CompletableFuture<JsonElement> setSelectionResult, boolean uiAlreadyUpdated, boolean textEditorUpdated) {
       skipIfDisposed(() ->
                        // TODO(jacobr): we need to cancel if another inspect request comes in while we are trying this one.
                        setSelectionResult.thenAcceptAsync(
-                         (JsonElement json) -> skipIfDisposed(() -> handleSetSelectionHelper(json.getAsBoolean(), uiAlreadyUpdated)))
+                         (JsonElement json) -> skipIfDisposed(() -> handleSetSelectionHelper(json.getAsBoolean(), uiAlreadyUpdated, textEditorUpdated)))
       );
     }
 
@@ -1072,7 +1176,7 @@ public class InspectorService implements Disposable {
   }
 
   public interface InspectorServiceClient {
-    void onInspectorSelectionChanged();
+    void onInspectorSelectionChanged(boolean uiAlreadyUpdated, boolean textEditorUpdated);
 
     void onFlutterFrame();
 

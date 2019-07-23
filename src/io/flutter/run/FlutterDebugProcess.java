@@ -25,6 +25,7 @@ import io.flutter.actions.ReloadAllFlutterApps;
 import io.flutter.actions.ReloadFlutterApp;
 import io.flutter.actions.RestartAllFlutterApps;
 import io.flutter.actions.RestartFlutterApp;
+import io.flutter.inspector.InspectorService;
 import io.flutter.run.common.RunMode;
 import io.flutter.inspector.EvalOnDartLibrary;
 import io.flutter.run.daemon.FlutterApp;
@@ -41,6 +42,7 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.*;
 import java.lang.reflect.InvocationTargetException;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * A debug process that handles hot reloads for Flutter.
@@ -70,18 +72,17 @@ public class FlutterDebugProcess extends DartVmServiceDebugProcess implements Di
 
   String currentIsolateId;
 
-  EvalOnDartLibrary dartLibraryForEval;
+  CompletableFuture<InspectorService> inspectorService;
 
   public String getCurrentIsolateId() {
     return currentIsolateId;
   }
 
-  public EvalOnDartLibrary getDartLibraryForEval() {
-    return dartLibraryForEval;
-  }
-
-  public void setDartLibraryForEval(EvalOnDartLibrary library) {
-    dartLibraryForEval = library;
+  public CompletableFuture<InspectorService> getInspectorService() {
+    if (inspectorService == null) {
+      inspectorService = InspectorService.create(app, app.getFlutterDebugProcess(), app.getVmService());
+    }
+    return inspectorService;
   }
 
   @Override

@@ -146,6 +146,8 @@ public class EvalOnDartLibrary implements Disposable {
 
       @Override
       public void onError(RPCError error) {
+        System.out.println("Message=" + error.getMessage());
+        System.out.println("Details=" + error.getDetails());
         ret.completeExceptionally(new RuntimeException(error.getMessage()));
       }
 
@@ -172,36 +174,6 @@ public class EvalOnDartLibrary implements Disposable {
       }
     });
     return ret;
-  }
-
-  public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef ref, int width, int height) {
-    JsonObject params = new JsonObject();
-    params.addProperty("width", width);
-    params.addProperty("height", height);
-    params.addProperty("id", ref.getId());
-
-    return invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
-      final String imageString = response.get("result").getAsString();
-      // create a buffered image
-      byte[] imageBytes;
-      final BASE64Decoder decoder = new BASE64Decoder();
-      try {
-        imageBytes = decoder.decodeBuffer(imageString);
-      }
-      catch (IOException e) {
-        throw new RuntimeException("Error decoding base64 data: " + e.getMessage());
-      }
-      final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
-      BufferedImage image = null;
-      try {
-        image = ImageIO.read(byteArrayInputStream);
-        byteArrayInputStream.close();
-      }
-      catch (IOException e) {
-        throw new RuntimeException("Error decoding image: " + e.getMessage());
-      }
-      return image;
-    });
   }
 
   public CompletableFuture<InstanceRef> eval(String expression, Map<String, String> scope, InspectorService.ObjectGroup isAlive) {

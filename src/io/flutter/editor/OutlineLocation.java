@@ -167,7 +167,9 @@ public class OutlineLocation implements Comparable<OutlineLocation> {
     return marker == null ? line : marker.getDocument().getLineNumber(marker.getStartOffset());
   }
 
-  private int getColumnForOffset(int offset) {
+  public RangeMarker getMarker() { return marker;}
+
+  public int getColumnForOffset(int offset) {
     assert (marker != null);
     final Document document = marker.getDocument();
     final int currentLine = document.getLineNumber(offset);

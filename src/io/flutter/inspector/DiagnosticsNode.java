@@ -179,16 +179,11 @@ public class DiagnosticsNode {
    * For example, if the parent does not line break between properties, the
    * description of a property should also be a single line if possible.
    */
-  public Rectangle getBoundingBox() {
-    if (!json.has("boundingBox")) {
+  public TransformedRect getTransformToRoot() {
+    if (!json.has("transformToRoot")) {
       return null;
     }
-    JsonObject box = json.getAsJsonObject("boundingBox");
-    return new Rectangle((int)box.getAsJsonPrimitive("x").getAsDouble(),
-                         (int)box.getAsJsonPrimitive("y").getAsDouble(),
-                         (int)box.getAsJsonPrimitive("width").getAsDouble(),
-                         (int)box.getAsJsonPrimitive("height").getAsDouble()
-                         );
+    return  new TransformedRect(json.getAsJsonObject("transformToRoot"));
   }
 
   /**
@@ -876,7 +871,7 @@ public class DiagnosticsNode {
       if (service == null) {
         return;
       }
-      service.setSelection(ref, uiAlreadyUpdated);
+      service.setSelection(ref, uiAlreadyUpdated, false);
     });
   }
 }

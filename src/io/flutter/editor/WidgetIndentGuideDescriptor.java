@@ -9,6 +9,7 @@ import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.RangeMarker;
 import com.jetbrains.lang.dart.psi.DartExpression;
 import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
+import org.dartlang.analysis.server.protocol.Location;
 
 import java.util.ArrayList;
 import java.util.Map;
@@ -28,17 +29,13 @@ import java.util.Map;
 public class WidgetIndentGuideDescriptor {
   public static class WidgetPropertyDescriptor {
     private RangeMarker marker;
-    private final DartExpression dartExpression;
-    private final String name;
     private final FlutterOutlineAttribute attribute;
 
-    WidgetPropertyDescriptor(String name, DartExpression dartExpression, FlutterOutlineAttribute attribute) {
-      this.dartExpression = dartExpression;
-      this.name = name;
+    WidgetPropertyDescriptor(FlutterOutlineAttribute attribute) {
       this.attribute = attribute;
     }
 
-    public String getName() { return name;}
+    public String getName() { return attribute.getName();}
 
     public FlutterOutlineAttribute getAttribute() {
       return attribute;
@@ -46,7 +43,10 @@ public class WidgetIndentGuideDescriptor {
 
     public int getEndOffset() {
       if (marker == null) {
-        return dartExpression.getTextOffset() + dartExpression.getTextLength();
+        final Location location = attribute.getValueLocation();
+        final int startOffset = attribute.getValueLocation().getOffset();
+        final int endOffset = startOffset + location.getLength();
+        return endOffset;
       }
       return marker.getEndOffset();
     }
@@ -61,9 +61,9 @@ public class WidgetIndentGuideDescriptor {
       // Create a range marker that goes from the start of the indent for the line
       // to the column of the actual entity.
       final int docLength = document.getTextLength();
-      int startOffset = dartExpression.getTextOffset();
-      startOffset = Math.min(startOffset, docLength);
-      final int endOffset = Math.min(startOffset + dartExpression.getTextLength(), docLength);
+      final Location location = attribute.getValueLocation();
+      final int startOffset = Math.min(attribute.getValueLocation().getOffset(), docLength);
+      final int endOffset = Math.min(startOffset + location.getLength(), docLength);
 
       marker = document.createRangeMarker(startOffset, endOffset);
 //      nodeStartingWord = OutlineLocation.getCurrentWord(document, nameExpression);

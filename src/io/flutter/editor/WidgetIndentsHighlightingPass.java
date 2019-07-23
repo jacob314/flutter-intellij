@@ -14,6 +14,8 @@ import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.*;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.popup.JBPopup;
+import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.Segment;
 import com.intellij.openapi.util.TextRange;
@@ -24,23 +26,38 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.ui.Gray;
 import com.intellij.ui.JBColor;
+import com.intellij.ui.awt.RelativePoint;
+import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBPanel;
+import com.intellij.ui.components.JBTextField;
+import com.intellij.ui.components.panels.VerticalLayout;
 import com.intellij.ui.paint.LinePainter2D;
 import com.intellij.util.DocumentUtil;
 import com.intellij.util.text.CharArrayUtil;
+import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import com.jetbrains.lang.dart.psi.*;
+import io.flutter.dart.FlutterDartAnalysisServer;
+import io.flutter.inspector.*;
 import io.flutter.settings.FlutterSettings;
+import io.flutter.utils.AsyncRateLimiter;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
 import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
+import org.dartlang.analysis.server.protocol.FlutterWidgetProperty;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.font.FontRenderContext;
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Rectangle2D;
 import java.util.List;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
+import static io.flutter.inspector.InspectorService.toSourceLocationUri;
 import static java.lang.Math.*;
 
 // Instructions for how this code should be tested:
@@ -98,6 +115,10 @@ import static java.lang.Math.*;
 public class WidgetIndentsHighlightingPass {
   private static final Logger LOG = Logger.getInstance(WidgetIndentsHighlightingPass.class);
 
+  private final static Color TOOLTIP_BACKGROUND_COLOR = new Color(60, 60, 60, 230);
+  private final static Color HIGHLIGHTED_RENDER_OBJECT_FILL_COLOR = new Color( 128, 128, 255, 128);
+  private final static Color HIGHLIGHTED_RENDER_OBJECT_BORDER_COLOR = new Color(64, 64, 128, 128);
+
   private final static Stroke SOLID_STROKE = new BasicStroke(1);
   private final static JBColor VERY_LIGHT_GRAY = new JBColor(Gray._224, Gray._80);
   private final static JBColor SHADOW_GRAY = new JBColor(Gray._192, Gray._100);
@@ -112,32 +133,111 @@ public class WidgetIndentsHighlightingPass {
    */
   private final static boolean DEBUG_WIDGET_INDENTS = false;
 
-  private static class WidgetCustomHighlighterRenderer implements CustomHighlighterRenderer {
+  public static class WidgetCustomHighlighterRenderer implements CustomHighlighterRenderer {
     private final WidgetIndentGuideDescriptor descriptor;
+    private final RangeHighlighter highlighter;
     private final Document document;
     private boolean isSelected = false;
     private final WidgetIndentsPassData data; // XXX for visilbe rect only.
+    private final FlutterDartAnalysisServer flutterDartAnalysisService;
+    private final EditorEx editor;
+    // XXX remove and use the better GroupManager abstraction everywhere eliminating all futures stored here.
+    private InspectorService.ObjectGroup group;
+    private InspectorObjectGroupManager hover;
 
-    WidgetCustomHighlighterRenderer(WidgetIndentGuideDescriptor descriptor, Document document, WidgetIndentsPassData data) {
+    static final int PREVIEW_WIDTH = 240;
+    static final int PREVIEW_HEIGHT = 320;
+    private JBPopup popup;
+    private Point lastPoint;
+    private ArrayList<DiagnosticsNode> currentHits;
+
+    private AsyncRateLimiter mouseRateLimiter;
+    public static final double MOUSE_FRAMES_PER_SECOND = 10.0;
+    private boolean controlDown;
+    private boolean shiftDown;
+
+    AsyncRateLimiter getMouseRateLimiter() {
+      if (mouseRateLimiter != null) return mouseRateLimiter;
+      mouseRateLimiter = new AsyncRateLimiter(MOUSE_FRAMES_PER_SECOND, () -> { return updateMouse(false); });
+      return mouseRateLimiter;
+    }
+
+    public InspectorObjectGroupManager getHover() {
+      if (hover != null && hover.getInspectorService() == getInspectorService()) {
+        return hover;
+      }
+      if (getInspectorService() == null) return null;
+      hover = new InspectorObjectGroupManager(getInspectorService(), "hover");
+      return hover;
+    }
+
+    double getDPI() { return 2.0; }
+    int toPixels(int value) { return (int)(value * getDPI()); }
+    boolean visible = false;
+    private CompletableFuture<Screenshot> screenshot;
+    CompletableFuture<ArrayList<DiagnosticsNode>> nodes;
+    Screenshot lastScreenshot;
+    Rectangle lastScreenshotBounds;
+    private ArrayList<DiagnosticsNode> boxes;
+    private DiagnosticsNode root;
+    int maxHeight;
+
+    WidgetCustomHighlighterRenderer(WidgetIndentGuideDescriptor descriptor, Document document, WidgetIndentsPassData data, FlutterDartAnalysisServer flutterDartAnalysisService, EditorEx editor, RangeHighlighter highlighter) {
       this.descriptor = descriptor;
       this.document = document;
       this.data = data;
+      this.flutterDartAnalysisService = flutterDartAnalysisService;
+      this.editor = editor;
+      this.highlighter = highlighter;
       descriptor.trackLocations(document);
+      updateVisibleArea(data.visibleRect);
     }
 
     void dispose() {
       // Descriptors must be disposed so they stop getting notified about
       // changes to the Editor.
       descriptor.dispose();
+      if (group != null) {
+        group.dispose();
+      }
     }
 
     boolean setSelection(boolean value) {
       if (value == isSelected) return false;
       isSelected = value;
+      if (value) {
+        computeActiveElements();
+        if (nodes != null) {
+          group.safeWhenComplete(nodes, (matching, error) -> {
+            InspectorService service = getInspectorService();
+            if (service == null || error != null || matching == null || matching.isEmpty()) return;
+            if (group == null) return;
+            group.setSelection(matching.get(0).getValueRef(), false, true);
+          });
+        }
+
+        final List<FlutterWidgetProperty> properties =
+          this.flutterDartAnalysisService.getWidgetDescription(this.editor.getVirtualFile(), descriptor.widget.getOffset());
+        /* XXX display properties UI.
+        if (properties != null && !properties.isEmpty()) {
+          System.out.println("XXX properties=" + properties);
+        } else {
+          System.out.println("XXX no properties");
+        }
+
+         */
+      }
       return true;
+
     }
 
-    boolean updateSelected(@NotNull Editor editor, @NotNull RangeHighlighter highlighter, Caret carat) {
+    void updateSelected(Caret carat) {
+      if (updateSelectedHelper(carat)) {
+        forceRender();
+      }
+    }
+
+    boolean updateSelectedHelper(Caret carat) {
       if (carat == null) {
         return setSelection(false);
       }
@@ -187,11 +287,102 @@ public class WidgetIndentsHighlightingPass {
       return (float)font.getStringBounds(text, fontRenderContext).getWidth();
     }
 
-    Point offsetToPoint(int offset, Editor editor) {
-      VisualPosition visualPosition = editor.offsetToVisualPosition(offset);
-      return editor.visualPositionToXY(visualPosition);
+    Point offsetToPoint(int offset) {
+      return editor.visualPositionToXY( editor.offsetToVisualPosition(offset));
     }
 
+    public void computeScreenshotBounds() {
+      lastScreenshotBounds = null;
+      maxHeight = 320; // XXX
+      if (descriptor == null || descriptor.parent != null) return;
+
+      final int startOffset = highlighter.getStartOffset();
+      final Document doc = highlighter.getDocument();
+      final int textLength = doc.getTextLength();
+      if (startOffset >= textLength) return;
+
+      final int endOffset = min(highlighter.getEndOffset(), textLength);
+
+      int off;
+      int startLine = doc.getLineNumber(startOffset);
+      final int lineHeight = editor.getLineHeight();
+
+      int widgetOffset = descriptor.widget.getOffset();
+      int widgetLine = doc.getLineNumber(widgetOffset);
+      int lineEndOffset = doc.getLineEndOffset(widgetLine);
+
+      // Request a thumbnail and render it in the space available.
+      VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
+      visualPosition = new VisualPosition(max(visualPosition.line, 0), max(visualPosition.column + 30, 81));
+      final Point start = editor.visualPositionToXY(visualPosition);
+      final Point endz = offsetToPoint(endOffset);
+      int endY = endz.y;
+      int visibleEndX = data.visibleRect.x + data.visibleRect.width;
+      int width = max(0, visibleEndX - 20 - start.x);
+      int height = max(0, endY - start.y);
+      int previewStartY = start.y;
+      int previewStartX = start.x;
+      assert (data.visibleRect != null);
+      int visibleStart = data.visibleRect.y;
+      int visibleEnd = (int)data.visibleRect.getMaxY();
+
+      Screenshot latestScreenshot = getScreenshotNow();
+      int previewWidth = PREVIEW_WIDTH;
+      int previewHeight = PREVIEW_HEIGHT;
+      if (latestScreenshot != null) {
+        previewWidth = (int)(latestScreenshot.image.getWidth() / getDPI());
+        previewHeight = (int)(latestScreenshot.image.getHeight() / getDPI());
+      }
+      previewStartX = max(previewStartX, visibleEndX - previewWidth - 20);
+      previewHeight = min(previewHeight, height);
+
+      maxHeight = endz.y - start.y;
+      if (start.y <= visibleEnd && endY >= visibleStart) {
+        if (visibleStart > previewStartY) {
+          previewStartY = max(previewStartY, visibleStart);
+          previewStartY = min(previewStartY, min(endY - previewHeight, visibleEnd - previewHeight));
+        }
+        lastScreenshotBounds = new Rectangle(previewStartX, previewStartY, previewWidth, previewHeight);
+      }
+      if (visible) {
+        /*
+        if (popup != null && popup.isVisible() && !popup.isDisposed()) {
+          Point existing = popup.getLocationOnScreen();
+          // editor.get
+          // editor.getScrollPane().getVerticalScrollBar().getValue()
+          Point newPoint = new Point((int)lastScreenshotBounds.getCenterX(), (int)lastScreenshotBounds.getCenterY());
+          SwingUtilities
+            .convertPointFromScreen(newPoint, editor.getComponent());
+          System.out.println("XXX Existing = " + existing);
+          System.out.println("XXX NewPoint = " + newPoint);
+
+          if (!existing.equals(newPoint)) {
+            // popup.setLocation(newPoint);
+          }
+
+        }
+         */
+      } else {
+        if (popup != null && !popup.isDisposed()) {
+          popup.dispose();
+          popup = null;
+        }
+      }
+    }
+
+    public Screenshot getScreenshotNow() {
+      Screenshot image = null;
+      if (screenshot != null) {
+        image = screenshot.getNow(null);
+      }
+      if (image == null) {
+        // TODO(jacobr): warn that it might be stale.
+        image = lastScreenshot;
+      }
+
+      lastScreenshot = image;
+      return image;
+    }
     @Override
     public void paint(@NotNull Editor editor, @NotNull RangeHighlighter highlighter, @NotNull Graphics g) {
       if (!highlighter.isValid()) {
@@ -223,80 +414,103 @@ public class WidgetIndentsHighlightingPass {
       final int lineHeight = editor.getLineHeight();
       final Rectangle clip = g2d.getClipBounds();
 
-      if (descriptor != null)
-      {
-        int widgetOffset = descriptor.widget.getOffset();
-        int widgetLine = doc.getLineNumber(widgetOffset);
-        int lineEndOffset = doc.getLineEndOffset(widgetLine);
-        g2d.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+      computeScreenshotBounds();
 
+      if (lastScreenshotBounds != null) {
         final Font font = UIUtil.getFont(UIUtil.FontSize.NORMAL, UIUtil.getTreeFont());
         g2d.setFont(font);
-        if (descriptor.parent == null) {
-          // Request a thumbnail and render it in the space available.
-          VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
-          visualPosition = new VisualPosition(max(visualPosition.line, 0), max(visualPosition.column + 30, 81));
-          final Point start = editor.visualPositionToXY(visualPosition);
-          final Point endz = offsetToPoint(endOffset, editor);
-          int endY = endz.y;
+        // Request a thumbnail and render it in the space available.
 
-          int previewWidth = 240;
-          int previewHeight = 320;
-          if (editor instanceof EditorEx) {
-            EditorEx textEditor = (EditorEx) editor;
+        /// XXX do proper clipping as well to optimize. ?
+        g2d.setColor(isSelected ? JBColor.GRAY: JBColor.LIGHT_GRAY);
 
-            /* XXX doesn't quite work as our range highlighter doesn't extend far enough. */
-            /* if (endY - start.y < previewHeight) {
-              int oldEndY = endY;
-              endY = start.y + previewHeight;
-              if (descriptor.nextSibling != null) {
-                VisualPosition siblingStart = editor.offsetToVisualPosition(descriptor.nextSibling.widget.getOffset()); //
-                siblingStart = new VisualPosition(max(0, siblingStart.line - 2), siblingStart.column);
-                final Point siblingStartPt = editor.visualPositionToXY(siblingStart);
-                endY = max(oldEndY, siblingStartPt.y);
+        final Screenshot latestScreenshot = getScreenshotNow();
+        if (latestScreenshot != null) {
+          lastScreenshot = latestScreenshot;
+          int imageWidth = (int)(latestScreenshot.image.getWidth() * getDPI());
+          int imageHeight = (int)(latestScreenshot.image.getHeight() * getDPI());
+          g2d.setColor(Color.WHITE);
+        //  g2d.clipRect(lastScreenshotBounds.x, lastScreenshotBounds.y, min(lastScreenshotBounds.width, imageWidth), min(lastScreenshotBounds.height, imageHeight));
+          g2d.fillRect(lastScreenshotBounds.x, lastScreenshotBounds.y, min(lastScreenshotBounds.width, imageWidth), min(lastScreenshotBounds.height, imageHeight));
+          g2d.drawImage(latestScreenshot.image, new AffineTransform(1/getDPI(), 0f, 0f, 1/getDPI(), lastScreenshotBounds.x, lastScreenshotBounds.y), null);
+          final List<DiagnosticsNode> nodesToHighlight = getNodesToHighlight();
+          if (nodesToHighlight != null && nodesToHighlight.size() > 0) {
+            boolean first = true;
+            for (DiagnosticsNode box : nodesToHighlight) {
+              final TransformedRect transform = box.getTransformToRoot();
+              if (transform != null) {
+                double x, y;
+                final Matrix4 matrix = buildTransformToScreenshot(latestScreenshot);
+                matrix.multiply(transform.getTransform());
+                Rectangle2D rect = transform.getRectangle();
+
+                Vector3[] points = new Vector3[]{
+                  matrix.perspectiveTransform(new Vector3(new double[]{rect.getMinX(), rect.getMinY(), 0})),
+                  matrix.perspectiveTransform(new Vector3(new double[]{rect.getMaxX(), rect.getMinY(), 0})),
+                  matrix.perspectiveTransform(new Vector3(new double[]{rect.getMaxX(), rect.getMaxY(), 0})),
+                  matrix.perspectiveTransform(new Vector3(new double[]{rect.getMinX(), rect.getMaxY(), 0}))
+                };
+
+
+                final Polygon polygon = new Polygon();
+                for (Vector3 point : points) {
+                  polygon.addPoint((int)Math.round(point.getX()), (int)Math.round(point.getY()));
+                }
+
+                if (first) {
+                  g2d.setColor(HIGHLIGHTED_RENDER_OBJECT_BORDER_COLOR);
+                  g2d.fillPolygon(polygon);
+                }
+                g2d.setStroke(SOLID_STROKE);
+                g2d.setColor(HIGHLIGHTED_RENDER_OBJECT_BORDER_COLOR);
+                g2d.drawPolygon(polygon);
               }
-            }*/
-
-            int visibleEndX = data.visibleRect.x + data.visibleRect.width;
-            int width = max(0, visibleEndX - 20 - start.x);
-            int height = max(0, endY - start.y);
-            g2d.setColor(Gray._48);
-            g2d.fillRect(start.x, start.y, width, height);
-            int previewStartY = start.y;
-            int previewStartX = start.x;
-            assert (data.visibleRect != null);
-            int visibleStart = data.visibleRect.y;
-            int visibleEnd = (int)data.visibleRect.getMaxY();
-            previewStartX = max(previewStartX, visibleEndX - previewWidth - 20);
-            previewHeight = min(previewHeight, height);
-
-            if (start.y <= visibleEnd && endY >= visibleStart) {
-              if (visibleStart > previewStartY) {
-                previewStartY = max(previewStartY, visibleStart);
-                previewStartY = min(previewStartY, min(endY - previewHeight, visibleEnd - previewHeight));
-              }
-              /// XXX do proper clipping as well to optimize. ?
-              g2d.setColor(JBColor.BLUE);
-              g2d.fillRect(previewStartX, previewStartY, previewWidth, previewHeight);
+              first = false;
 
             }
           }
+        } else {
+          g2d.setColor(isSelected ? JBColor.GRAY: JBColor.LIGHT_GRAY);
+          g2d.fillRect(lastScreenshotBounds.x, lastScreenshotBounds.y, lastScreenshotBounds.width, lastScreenshotBounds.height);
         }
 
         {
           g2d.setColor(descriptor.parent == null ? JBColor.blue : JBColor.red);
+          final int widgetOffset = descriptor.widget.getOffset();
+          final int widgetLine = doc.getLineNumber(widgetOffset);
+          final int lineEndOffset = doc.getLineEndOffset(widgetLine);
           VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
           visualPosition = new VisualPosition(visualPosition.line, max(visualPosition.column + 1, 4));
           // final VisualPosition startPosition = editor.offsetToVisualPosition(off);
           final Point start = editor.visualPositionToXY(visualPosition);
           if (start.y + lineHeight > clip.y && start.y < clip.y + clip.height) {
-            g2d.drawString("WIDGET!", start.x, start.y + lineHeight - 4);
+            String message = "";
+            if (nodes != null) {
+              final ArrayList<DiagnosticsNode> matching = nodes.getNow(null);
+              if (matching == null) {
+                message = "Fetching...";
+              } else {
+                if (matching.isEmpty()) {
+                  message = "Widget inactive";
+                } else {
+                  final DiagnosticsNode first = matching.get(0);
+                  message = first.getDescription();
+                  if (matching.size() > 1) {
+                    message += " (" + matching.size() + " matching)";
+                  }
+                }
+              }
+            }
+            g2d.drawString(message, start.x, start.y + lineHeight - 4);
           }
         }
+  // XXX
+        //      Rectangle bounds = g2d.getClipBounds();
+//        g2d.setClip(bounds.x, bounds.y, 800, bounds.height);
         for (WidgetIndentGuideDescriptor.WidgetPropertyDescriptor property : descriptor.properties) {
           int propertyEndOffset = property.getEndOffset();
           int propertyLine = doc.getLineNumber(propertyEndOffset);
-          lineEndOffset = doc.getLineEndOffset(propertyLine);
+          int lineEndOffset = doc.getLineEndOffset(propertyLine);
 
           VisualPosition visualPosition = editor.offsetToVisualPosition(lineEndOffset); // e
           visualPosition = new VisualPosition(visualPosition.line, max(visualPosition.column + 1, 4));
@@ -339,7 +553,7 @@ public class WidgetIndentsHighlightingPass {
               //          g2d.setColor(JBColor.LIGHT_GRAY);
               //        g2d.fillRect(start.x, start.y, (int)width + 8, lineHeight);
               g2d.setColor(SHADOW_GRAY);
-              g2d.drawString(text, start.x + 4, start.y + lineHeight - 4);
+             // XXX g2d.drawString(text, start.x + 4, start.y + lineHeight - 4);
             }
           }
         }
@@ -567,6 +781,301 @@ public class WidgetIndentsHighlightingPass {
       }
       g2d.dispose();
     }
+
+    private ArrayList<DiagnosticsNode> getNodesToHighlight() {
+      return currentHits != null && currentHits.size() > 0 ? currentHits : boxes;
+    }
+
+    @NotNull
+    /**
+     * Builds a transform that
+     */
+    private Matrix4 buildTransformToScreenshot(Screenshot latestScreenshot) {
+      final Matrix4 matrix = Matrix4.identity();
+      matrix.translate(lastScreenshotBounds.x, lastScreenshotBounds.y, 0);
+      final Rectangle2D imageRect = latestScreenshot.transformedRect.getRectangle();
+      final double centerX = imageRect.getCenterX();
+      final double centerY = imageRect.getCenterY();
+      matrix.translate(-centerX, -centerY, 0);
+      matrix.scale(1/getDPI(), 1/getDPI(), 1/getDPI());
+      matrix.translate(centerX * getDPI(), centerY * getDPI(), 0);
+      //                matrix.translate(-latestScreenshot.transformedRect.getRectangle().getX(), -latestScreenshot.transformedRect.getRectangle().getY(), 0);
+      matrix.multiply(latestScreenshot.transformedRect.getTransform());
+      return matrix;
+    }
+
+    public void onVisibileAreaChanged(Rectangle oldRectangle, Rectangle newRectangle) {
+      updateVisibleArea(newRectangle);
+    }
+
+    public void updateVisibleArea(Rectangle newRectangle) {
+      if (descriptor.parent != null) return;
+
+      final Point start = offsetToPoint(highlighter.getStartOffset());
+      final Point end = offsetToPoint(highlighter.getEndOffset());
+      final boolean nowVisible = newRectangle.y <= end.y && newRectangle.y + newRectangle.height >= start.y;
+      if (visible != nowVisible) {
+        visible = nowVisible;
+        onVisibleChanged();
+      }
+    }
+
+    InspectorService getInspectorService() {
+      if (data ==null ) return null;
+      return data.inspectorService;
+    }
+
+    void computeActiveElements() {
+      nodes = null;
+      InspectorService service = getInspectorService();
+      if (service == null) return;
+      if (group != null) {
+        group.dispose();
+        group = null;
+        nodes = null;
+        // XXX be smart based on if the element actually changed. The ValueId should work for this.
+        //        screenshot = null;
+      }
+      group = service.createObjectGroup("editor");
+      // XXX
+      final String file = toSourceLocationUri(this.editor.getVirtualFile().getPath());
+      int line =  descriptor.widget.getLine();
+      int column =  descriptor.widget.getColumn();
+      final RangeMarker marker = descriptor.widget.getMarker();
+      if (marker.isValid()) {
+        int offset = marker.getStartOffset();
+        // FIXup handling of Foo.bar named constructors.
+        int documentEnd = document.getTextLength();
+        int constructorStart = marker.getEndOffset() -1;
+        int candidateEnd = min(documentEnd, constructorStart + 1000); // XX hack.
+        final String text = document.getText(new TextRange(constructorStart, candidateEnd));
+        for (int i = 0; i < text.length(); ++i) {
+          char c = text.charAt(i);
+          if (c == '.') {
+            int offsetKernel = constructorStart + i + 1;
+            line = marker.getDocument().getLineNumber(offsetKernel);
+            column = descriptor.widget.getColumnForOffset(offsetKernel);
+            break;
+          }
+          if (c == '(') break;
+        }
+      }
+      nodes = group.getElementsAtLocation(file, line + 1, column + 1, 10);
+    }
+
+    // XXX break this pipeline down and avoid fetching screenshots when not needed.
+    public void onVisibleChanged() {
+      if (!visible) {
+        if (popup != null && !popup.isDisposed()) {
+          popup.dispose();
+          System.out.println("XXX kill popup");
+          popup = null;
+        }
+      }
+      if (visible && data != null && data.inspectorService != null) {
+        computeScreenshotBounds();
+        computeActiveElements();
+        if (nodes != null) {
+          group.safeWhenComplete(nodes, (matching, error) -> {
+            if (error != null) {
+              System.out.println("XXX error=" + error);
+            }
+            if (matching == null || error != null) return;
+
+            if (!matching.isEmpty()) {
+              int height = PREVIEW_HEIGHT;
+              if (lastScreenshotBounds != null) {
+                // Unless something went horribly wrong
+                height = max(lastScreenshotBounds.height, 80); // XXX arbitrary.
+              }
+              root = matching.get(0);
+              if (data.inspectorSelection != null) {
+                group.safeWhenComplete(group.getBoundingBoxes(root, data.inspectorSelection), (boxes, selectionError) -> {
+                  if (selectionError != null) {
+                    this.boxes = null;
+                    return;
+                  }
+                  this.boxes = boxes;
+                  forceRender();
+                });
+              }
+              if (screenshot == null) {
+                screenshot = group.getScreenshot(root.getValueRef(), toPixels(PREVIEW_WIDTH), toPixels(height), getDPI());
+                group.safeWhenComplete(screenshot, (s, e2) -> {
+                  if (e2 != null) return;
+                  lastScreenshot = s;
+                  forceRender();
+                });
+              }
+            }
+          });
+        }
+      } else {
+        /// XXX this is a bit aggressive. We might want to wait until the file has closed or X seconds have passed.
+        if (group != null) {
+          group.dispose();
+        }
+      }
+    }
+
+    private void forceRender() {
+      // TODO(jacobr): add a version that only forces what is needed for the screenshot.
+      editor.repaint(highlighter.getStartOffset(), highlighter.getEndOffset());
+    }
+
+    public void onInspectorDataChange(boolean invalidateScreenshot) {
+      if (group != null) {
+        group.dispose();
+      }
+      group = null;
+      if (invalidateScreenshot) {
+        screenshot = null;
+      }
+      nodes = null;
+      // XX this might be too much.
+      onVisibleChanged();
+    }
+
+    public void onInspectorAvailable() {
+      onVisibleChanged();
+    }
+
+    public void onSelectionChanged() {
+      onInspectorDataChange(false); // XXX a bit smarter and don't kill the screenshot.
+    }
+
+    public CompletableFuture<?> updateMouse(boolean navigateTo) {
+      final Screenshot latestScreenshot = getScreenshotNow();
+      if (lastScreenshotBounds == null || latestScreenshot == null || lastPoint == null || !lastScreenshotBounds.contains(lastPoint) || root == null) return CompletableFuture.completedFuture(null);
+      InspectorObjectGroupManager g = getHover();
+      g.cancelNext();
+      final InspectorService.ObjectGroup nextGroup = g.getNext();
+      final Matrix4 matrix = buildTransformToScreenshot(latestScreenshot);
+      matrix.invert();
+      final Vector3 point = matrix.perspectiveTransform(new Vector3(lastPoint.getX(), lastPoint.getY(), 0));
+      final String file;
+      final int startLine, endLine;
+      if (controlDown) {
+        file = null;
+      } else {
+        file = toSourceLocationUri(this.editor.getVirtualFile().getPath());
+      }
+      if (controlDown || shiftDown) {
+        startLine = -1;
+        endLine = -1;
+      } else {
+        startLine = document.getLineNumber(highlighter.getStartOffset());
+        endLine = document.getLineNumber(highlighter.getEndOffset());
+      }
+
+      final CompletableFuture<ArrayList<DiagnosticsNode>> hitResults = nextGroup.hitTest(root, point.getX(), point.getY(), file, startLine, endLine);
+      nextGroup.safeWhenComplete(hitResults, (hits, error) -> {
+        if (error != null) {
+          System.out.println("Got error:" + error);
+          return;
+        }
+        if (hits == currentHits) {
+          // Existing hits are still valid.
+          // TODO(jacobr): check cases where similar but not identical.. E.g. check the bounding box matricies and ids!
+          return;
+        }
+//            System.out.println("XXX hits = " + hits);
+        currentHits = hits;
+        forceRender();
+        g.promoteNext();
+        if (navigateTo && hits.size() > 0) {
+          group.setSelection(hits.get(0).getValueRef(), false, false);
+        }
+      });
+      return hitResults;
+    }
+
+    public void updateMouseCursor() {
+      if (lastScreenshotBounds == null) return;
+      if (lastPoint != null && lastScreenshotBounds.contains(lastPoint)) {
+        // TODO(jacobr): consider CROSSHAIR_CURSOR instead which gives more of
+        //  a pixel selection feel.
+        editor.setCustomCursor(this, Cursor.getPredefinedCursor(Cursor.DEFAULT_CURSOR));
+      }
+      else {
+        editor.setCustomCursor(this, null);
+        _mouseOutOfScreenshot();
+      }
+    }
+
+    void registerLastEvent(MouseEvent event) {
+      lastPoint = event.getPoint();
+      controlDown = event.isControlDown();
+      shiftDown = event.isShiftDown();
+      updateMouseCursor();
+    }
+
+    public void onMouseMoved(MouseEvent event) {
+      registerLastEvent(event);
+      getMouseRateLimiter().scheduleRequest();
+    }
+
+    public void onMousePressed(MouseEvent event) {
+      registerLastEvent(event);
+
+      if (lastScreenshotBounds == null) return;
+      if (lastScreenshotBounds.contains(event.getPoint())) {
+        System.out.println("XXX got mouse press within area!!!");
+        if (popup != null && !popup.isDisposed()) {
+          popup.dispose();
+        }
+        updateMouse(true);
+        // XXX only show popup after load of properties?
+        final Point topRight = event.getLocationOnScreen();
+        PropertyEditorPanel panel = new PropertyEditorPanel();
+        popup = JBPopupFactory.getInstance()
+          .createComponentPopupBuilder(panel, panel)
+          .setMovable(true)
+          .setAlpha(0.0f)
+          .setMinSize(new Dimension(200, 5))
+         // .setTitle("Properties")
+          .setCancelOnWindowDeactivation(true)
+          .setRequestFocus(true)
+          .createPopup();
+        popup.show(RelativePoint.fromScreen(topRight));
+        event.consume();
+      }
+    }
+
+    public void onMouseExited(MouseEvent event) {
+      lastPoint = null;
+      controlDown = false;
+      shiftDown = false;
+      updateMouseCursor();
+    }
+
+    public void _mouseOutOfScreenshot() {
+      hover = getHover();
+      if (hover != null) {
+        hover.cancelNext();
+        lastPoint = null;
+        controlDown = false;
+        shiftDown = false;
+      }
+      if (currentHits != null) {
+        currentHits = null;
+        forceRender();
+      }
+    }
+
+    public void onMouseEntered(MouseEvent event) {
+      onMouseMoved(event);
+    }
+  }
+
+  public static class PropertyEditorPanel extends JBPanel {
+    public PropertyEditorPanel() {
+      super(new VerticalLayout(5));
+      setBorder(JBUI.Borders.empty(5));
+      add(new JBLabel("Properties"));
+      add(new JBTextField("COLOR"));
+
+    }
   }
 
   private final EditorEx myEditor;
@@ -574,13 +1083,19 @@ public class WidgetIndentsHighlightingPass {
   private final Project myProject;
   private final VirtualFile myFile;
   private final PsiFile psiFile;
+  private final FlutterDartAnalysisServer flutterDartAnalysisService;
 
-  WidgetIndentsHighlightingPass(@NotNull Project project, @NotNull EditorEx editor) {
+  WidgetIndentsHighlightingPass(@NotNull Project project, @NotNull EditorEx editor, FlutterDartAnalysisServer flutterDartAnalysisService, InspectorService inspectorService) {
     this.myDocument = editor.getDocument();
     this.myEditor = editor;
     this.myProject = project;
     this.myFile = editor.getVirtualFile();
+    this.flutterDartAnalysisService = flutterDartAnalysisService;
     psiFile = PsiDocumentManager.getInstance(myProject).getPsiFile(myDocument);
+    final WidgetIndentsPassData data = getIndentsPassData();
+    data.inspectorService = inspectorService;
+    /// XXX cleanup
+    setIndentsPassData(editor, data);
   }
 
   private static void drawVerticalLineHelper(
@@ -637,15 +1152,18 @@ public class WidgetIndentsHighlightingPass {
   public static void onCaretPositionChanged(EditorEx editor, Caret caret) {
     final WidgetIndentsPassData data = getIndentsPassData(editor);
     if (data == null || data.highlighters == null) return;
-    for (RangeHighlighter h : data.highlighters) {
-      if (h.getCustomRenderer() instanceof WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer) {
-        final WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer =
-          (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer)h.getCustomRenderer();
-        final boolean changed = renderer.updateSelected(editor, h, caret);
-        if (changed) {
-          editor.repaint(h.getStartOffset(), h.getEndOffset());
-        }
-      }
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.updateSelected(caret);
+    }
+  }
+
+  public static void onInspectorDataChange(EditorEx editor, boolean force) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null) {
+      return;
+    }
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onInspectorDataChange(force); /// XXX lazily invalidate.
     }
   }
 
@@ -655,21 +1173,78 @@ public class WidgetIndentsHighlightingPass {
       data = new WidgetIndentsPassData();
       setIndentsPassData(editor, data);
     }
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onVisibileAreaChanged(oldRectangle, newRectangle);
+    }
     data.visibleRect = newRectangle;
   }
+
+  public static void onInspectorAvaiable(EditorEx editor, InspectorService inspectorService) {
+    WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null) {
+      data = new WidgetIndentsPassData();
+      setIndentsPassData(editor, data);
+    }
+    data.inspectorService = inspectorService;
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onInspectorAvailable();
+    }
+  }
+
+  public static void onSelectionChanged(EditorEx editor, DiagnosticsNode selection) {
+    WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null) {
+      data = new WidgetIndentsPassData();
+      setIndentsPassData(editor, data);
+    }
+    data.inspectorSelection = selection;
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onSelectionChanged();
+    }
+  }
+
 
   public static void onMouseMoved(EditorEx editor, MouseEvent event) {
     final WidgetIndentsPassData data = getIndentsPassData(editor);
     if (data == null || data.highlighters == null) return;
+
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onMouseMoved(event);
+      if (event.isConsumed()) break;
+    }
+
   }
 
   public static void onMousePressed(EditorEx editor, MouseEvent event) {
     final WidgetIndentsPassData data = getIndentsPassData(editor);
     if (data == null || data.highlighters == null) return;
 
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onMousePressed(event);
+      if (event.isConsumed()) break;
+    }
+  }
+
+  public static void onMouseEntered(EditorEx editor, MouseEvent event) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
+
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onMouseEntered(event);
+    }
+  }
+
+  public static void onMouseExited(EditorEx editor, MouseEvent event) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
+
+    for (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer : data.getRenderers()) {
+      renderer.onMouseExited(event);
+    }
   }
 
   private static WidgetIndentsPassData getIndentsPassData(Editor editor) {
+    if (editor == null) return null;
     return editor.getUserData(INDENTS_PASS_DATA_KEY);
   }
 
@@ -704,8 +1279,13 @@ public class WidgetIndentsHighlightingPass {
     setIndentsPassData(editor, null);
   }
 
-  public static void run(@NotNull Project project, @NotNull EditorEx editor, @NotNull FlutterOutline outline) {
-    final WidgetIndentsHighlightingPass widgetIndentsHighlightingPass = new WidgetIndentsHighlightingPass(project, editor);
+  public static void run(@NotNull Project project,
+                         @NotNull EditorEx editor,
+                         @NotNull FlutterOutline outline,
+                         FlutterDartAnalysisServer flutterDartAnalysisService,
+                         @Nullable InspectorService inspectorService
+                         ) {
+    final WidgetIndentsHighlightingPass widgetIndentsHighlightingPass = new WidgetIndentsHighlightingPass(project, editor, flutterDartAnalysisService, inspectorService);
     widgetIndentsHighlightingPass.setOutline(outline);
   }
 
@@ -959,9 +1539,6 @@ public class WidgetIndentsHighlightingPass {
   ) {
     if (outlineNode == null) return;
 
-    if (StringUtil.equals(outlineNode.getClassName(), "ExpandingBottomSheet")) {
-      System.out.println("XXX BOTTOM");
-    }
     final String kind = outlineNode.getKind();
     final boolean widgetConstructor = "NEW_INSTANCE".equals(kind) || (parent != null && ("VARIABLE".equals(kind)));
 
@@ -990,60 +1567,17 @@ public class WidgetIndentsHighlightingPass {
           childrenLocations.add(childLocation);
         }
       }
-      Set<Integer> childrenOffsets = new HashSet<Integer>();
+      final Set<Integer> childrenOffsets = new HashSet<Integer>();
       for (OutlineLocation childLocation : childrenLocations) {
         childrenOffsets.add(childLocation.getOffset());
       }
 
       final PsiElement element=  psiFile.findElementAt(location.getOffset());
-      ArrayList<WidgetIndentGuideDescriptor.WidgetPropertyDescriptor> trustedAttributes = new ArrayList<>();
-      final DartCallExpression callExpression = getCallExpression(element);
-      if (callExpression != null) {
-        final DartArguments arguments = callExpression.getArguments();
-        Map<String, DartExpression> foundParameters = new HashMap<>();
-
-        final List<FlutterOutlineAttribute> attributes = outlineNode.getAttributes();
-        if (arguments != null) {
-          final DartArgumentList argumentsList = arguments.getArgumentList();
-          if (argumentsList != null) {
-            final List<DartNamedArgument> namedArguments = argumentsList.getNamedArgumentList();
-            for (DartNamedArgument argument : namedArguments) {
-              DartExpression parameter = argument.getParameterReferenceExpression();
-              DartExpression value = argument.getExpression();
-              String parameterName = parameter.getText();
-              if (childrenOffsets.contains(argument.getExpression().getTextOffset())) {
-                //  System.out.println("XXX SKIPPING parameter=value " + parameter.getText() + "==>" + value.getText());
-              }
-              else {
-                // System.out.println("XXX showing parameter=value " + parameter.getText() + "==>" + value.getText());
-                foundParameters.put(parameter.getText(), value);
-              }
-            }
-            // TODO(jacobr): handle non-named arguments as well.
-            int i = 0;
-            for (DartExpression argument : argumentsList.getExpressionList()) {
-              if (attributes == null || attributes.size() <= i) {
-                System.out.println("XXX Missing argument=" + argument);
-              } else {
-                foundParameters.put(attributes.get(i).getName(), argument);
-                i++;
-              }
-            }
-          }
-        }
-        if (attributes != null) {
-          for (FlutterOutlineAttribute attribute : attributes) {
-            final String name = attribute.getName();
-            final DartExpression parameterExpression = foundParameters.get(name);
-            if (parameterExpression != null) {
-              //            System.out.println("XXX found parameter: " + name + ": " +element.getText());
-              trustedAttributes.add(new WidgetIndentGuideDescriptor.WidgetPropertyDescriptor(name, parameterExpression, attribute));
-            }
-            else {
-//              System.out.println("XXX missing parameter: " + attribute.getName());
-              // XXX revisit.
-            }
-          }
+      final ArrayList<WidgetIndentGuideDescriptor.WidgetPropertyDescriptor> trustedAttributes = new ArrayList<>();
+      final List<FlutterOutlineAttribute> attributes = outlineNode.getAttributes();
+      if (attributes != null) {
+        for (FlutterOutlineAttribute attribute : attributes) {
+          trustedAttributes.add(new WidgetIndentGuideDescriptor.WidgetPropertyDescriptor(attribute));
         }
       }
 
@@ -1096,7 +1630,7 @@ public class WidgetIndentsHighlightingPass {
       highlighter.setErrorStripeTooltip("Flutter build method");
       highlighter.setThinErrorStripeMark(true);
     }
-    highlighter.setCustomRenderer(new WidgetCustomHighlighterRenderer(entry.descriptor, myDocument, data));
+    highlighter.setCustomRenderer(new WidgetCustomHighlighterRenderer(entry.descriptor, myDocument, data, flutterDartAnalysisService, myEditor, highlighter));
     return highlighter;
   }
 
@@ -1129,6 +1663,8 @@ public class WidgetIndentsHighlightingPass {
  */
 class WidgetIndentsPassData {
   public Rectangle visibleRect;
+  public InspectorService inspectorService;
+  public DiagnosticsNode inspectorSelection;
   /**
    * Descriptors describing the data model to render the widget indents.
    * <p>
@@ -1161,6 +1697,20 @@ class WidgetIndentsPassData {
    * Outline the widget indents are based on.
    */
   FlutterOutline outline;
+
+  Iterable<WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer> getRenderers() {
+    final ArrayList<WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer> renderers = new ArrayList<>();
+    if (highlighters != null) {
+      for (RangeHighlighter h : highlighters) {
+        if (h.getCustomRenderer() instanceof WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer) {
+          final WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer renderer =
+            (WidgetIndentsHighlightingPass.WidgetCustomHighlighterRenderer)h.getCustomRenderer();
+          renderers.add(renderer);
+        }
+      }
+    }
+    return renderers;
+  }
 }
 
 class TextRangeDescriptorPair {

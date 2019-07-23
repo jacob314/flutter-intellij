@@ -9,19 +9,14 @@ import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.dart.server.AnalysisServerListenerAdapter;
 import com.google.dart.server.ResponseListener;
-import com.google.gson.Gson;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
+import com.google.gson.*;
 import com.intellij.openapi.components.ServiceManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.Consumer;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
-import org.dartlang.analysis.server.protocol.FlutterOutline;
-import org.dartlang.analysis.server.protocol.FlutterService;
-import org.dartlang.analysis.server.protocol.SourceChange;
+import org.dartlang.analysis.server.protocol.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -112,25 +107,28 @@ public class FlutterDartAnalysisServer {
   }
 
   @Nullable
-  public SourceChange flutter_getChangeAddForDesignTimeConstructor(@NotNull VirtualFile file, int _offset) {
+  public List<FlutterWidgetProperty> getWidgetDescription(@NotNull VirtualFile file, int _offset) {
     final String filePath = FileUtil.toSystemDependentName(file.getPath());
     final int offset = analysisService.getOriginalOffset(file, _offset);
 
     final CountDownLatch latch = new CountDownLatch(1);
-    final AtomicReference<SourceChange> result = new AtomicReference<>();
+    final AtomicReference<List<FlutterWidgetProperty>> result = new AtomicReference<>();
     final String id = analysisService.generateUniqueId();
     responseConsumers.put(id, (resultObject) -> {
       try {
-        final JsonObject changeObject = resultObject.getAsJsonObject("change");
-        final SourceChange change = SourceChange.fromJson(changeObject);
-        result.set(change);
+        final JsonArray propertiesObject = resultObject.getAsJsonArray("properties");
+        final ArrayList<FlutterWidgetProperty> properties = new ArrayList<>();
+        for (JsonElement propertyObject : propertiesObject) {
+          properties.add(FlutterWidgetProperty.fromJson(propertyObject.getAsJsonObject()));
+        }
+        result.set(properties);
       }
       catch (Throwable ignored) {
       }
       latch.countDown();
     });
 
-    final JsonObject request = FlutterRequestUtilities.generateFlutterGetChangeAddForDesignTimeConstructor(id, filePath, offset);
+    final JsonObject request = FlutterRequestUtilities.generateFlutterGetWidgetDescription(id, filePath, offset);
     analysisService.sendRequest(id, request);
 
     Uninterruptibles.awaitUninterruptibly(latch, 100, TimeUnit.MILLISECONDS);
@@ -139,31 +137,26 @@ public class FlutterDartAnalysisServer {
 
 
   @Nullable
-  public SourceChange flutter_getChangeAddForDesignTimeConstructor(@NotNull VirtualFile file, int _offset) {
-    final String filePath = FileUtil.toSystemDependentName(file.getPath());
-    final int offset = analysisService.getOriginalOffset(file, _offset);
-
+  public boolean setWidgetPropertyValue(int propertyId, FlutterWidgetPropertyValue value) {
     final CountDownLatch latch = new CountDownLatch(1);
-    final AtomicReference<SourceChange> result = new AtomicReference<>();
+    final AtomicReference<Boolean> result = new AtomicReference<>();
     final String id = analysisService.generateUniqueId();
     responseConsumers.put(id, (resultObject) -> {
       try {
-        final JsonObject changeObject = resultObject.getAsJsonObject("change");
-        final SourceChange change = SourceChange.fromJson(changeObject);
-        result.set(change);
+        final JsonArray propertiesObject = resultObject.getAsJsonArray("properties");
+        result.set(true);
       }
       catch (Throwable ignored) {
       }
       latch.countDown();
     });
 
-    final JsonObject request = FlutterRequestUtilities.generateFlutterGetChangeAddForDesignTimeConstructor(id, filePath, offset);
+    final JsonObject request = FlutterRequestUtilities.generateFlutterSetWidgetPropertyValue(id, propertyId, value);
     analysisService.sendRequest(id, request);
 
     Uninterruptibles.awaitUninterruptibly(latch, 100, TimeUnit.MILLISECONDS);
     return result.get();
   }
-
 
   private void processString(String jsonString) {
     processResponse(new Gson().fromJson(jsonString, JsonObject.class));

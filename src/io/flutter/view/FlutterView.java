@@ -395,7 +395,7 @@ public class FlutterView implements PersistentStateComponent<FlutterViewState>, 
     }
     else {
       whenCompleteUiThread(
-        InspectorService.create(app, app.getFlutterDebugProcess(), app.getVmService()),
+        app.getFlutterDebugProcess().getInspectorService(),
         (InspectorService inspectorService, Throwable throwable) -> {
           // XXX remove
           // app.getFlutterDebugProcess().setInspectorService(inspectorService);
