@@ -23,8 +23,8 @@ public class OutlineLocation implements Comparable<OutlineLocation> {
   private final int line;
   private final int column;
   private final int indent;
-  private final int offset;
-  private final int endOffset;
+  final int offset;
+  final int endOffset;
   @Nullable
   private RangeMarker marker;
   @Nullable
@@ -197,6 +197,7 @@ public class OutlineLocation implements Comparable<OutlineLocation> {
   }
 
   public TextRange getTextRange() {
+    /// XXX this is inconsistent!
     return marker == null ? new TextRange(offset, endOffset) : new TextRange(marker.getStartOffset(), marker.getEndOffset());
   }
 

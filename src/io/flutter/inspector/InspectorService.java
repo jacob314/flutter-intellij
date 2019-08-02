@@ -613,8 +613,9 @@ public class InspectorService implements Disposable {
       params.addProperty("id", root.getValueRef().getId());
       params.addProperty("dx", dx);
       params.addProperty("dy", dy);
-      if (file != null)
-      params.addProperty("file", file);
+      if (file != null) {
+        params.addProperty("file", file);
+      }
 
       if (startLine >= 0 && endLine >= 0) {
         params.addProperty("startLine", startLine);
@@ -960,6 +961,10 @@ public class InspectorService implements Disposable {
 
     public CompletableFuture<DiagnosticsNode> getRootWidget() {
       return invokeServiceMethodReturningNode(isDetailsSummaryViewSupported() ? "getRootWidgetSummaryTree" : "getRootWidget");
+    }
+
+    public CompletableFuture<DiagnosticsNode> getElementForScreenshot() {
+      return invokeServiceMethodReturningNode("getElementForScreenshot");
     }
 
     public CompletableFuture<DiagnosticsNode> getSummaryTreeWithoutIds() {

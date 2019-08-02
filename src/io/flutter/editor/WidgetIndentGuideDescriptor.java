@@ -7,9 +7,14 @@ package io.flutter.editor;
 
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.RangeMarker;
+import com.intellij.openapi.util.Key;
+import com.intellij.openapi.util.TextRange;
 import com.jetbrains.lang.dart.psi.DartExpression;
+import org.dartlang.analysis.server.protocol.FlutterOutline;
 import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
 import org.dartlang.analysis.server.protocol.Location;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Map;
@@ -83,8 +88,10 @@ public class WidgetIndentGuideDescriptor {
   public final int startLine;
   public final int endLine;
   public final ArrayList<WidgetPropertyDescriptor> properties;
+  public final FlutterOutline outlineNode;
 
   public WidgetIndentGuideDescriptor nextSibling;
+  private RangeMarker marker;
 
   public WidgetIndentGuideDescriptor(
     WidgetIndentGuideDescriptor parent,
@@ -93,7 +100,8 @@ public class WidgetIndentGuideDescriptor {
     int endLine,
     ArrayList<OutlineLocation> childLines,
     OutlineLocation widget,
-    ArrayList<WidgetPropertyDescriptor> properties
+    ArrayList<WidgetPropertyDescriptor> properties,
+    FlutterOutline outlineNode
   ) {
     this.parent = parent;
     this.childLines = childLines;
@@ -102,6 +110,7 @@ public class WidgetIndentGuideDescriptor {
     this.startLine = startLine;
     this.endLine = endLine;
     this.properties = properties;
+    this.outlineNode =  outlineNode;
   }
 
   void dispose() {
@@ -117,6 +126,9 @@ public class WidgetIndentGuideDescriptor {
     }
 
     childLines.clear();
+    if (marker != null) {
+      marker.dispose();
+    }
   }
 
   /**
@@ -127,7 +139,11 @@ public class WidgetIndentGuideDescriptor {
    * to stop listening for changes to the document once the descriptor is
    * obsolete.
    */
+  boolean tracked = false;
   public void trackLocations(Document document) {
+
+    if (tracked) return;
+    tracked = true;
     if (widget != null) {
       widget.track(document);
     }
@@ -137,6 +153,18 @@ public class WidgetIndentGuideDescriptor {
     }
     for (WidgetPropertyDescriptor property : properties) {
       property.track(document);
+    }
+    if (parent == null && marker == null) {
+      marker = document.createRangeMarker(widget.offset, widget.endOffset);
+    }
+  }
+
+  public TextRange getMarker() {
+    if (marker == null) return new TextRange(widget.offset, widget.endOffset);
+    if (marker.isValid()) {
+      return new TextRange(marker.getStartOffset(), marker.getEndOffset());
+    } else {
+      return null;
     }
   }
 
@@ -178,7 +206,7 @@ public class WidgetIndentGuideDescriptor {
     // XXX add properties.
 
     for (int i = 0; i < childLines.size(); ++i) {
-      if (childLines.get(i).equals(that.childLines.get(i))) {
+      if (!childLines.get(i).equals(that.childLines.get(i))) {
         return false;
       }
     }

@@ -836,7 +836,7 @@ public class DiagnosticsNode {
       if (key.equals("objectId") || key.equals("valueId")) {
         continue;
       }
-      if (entry.getValue().equals(node.json.get(key))) {
+      if (!entry.getValue().equals(node.json.get(key))) {
         return false;
       }
     }
