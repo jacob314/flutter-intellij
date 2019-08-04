@@ -554,6 +554,7 @@ public class FlutterSdk {
 
     process.startNotify();
 
+    /*
     if (process.waitFor(5000)) {
       final long duration = System.currentTimeMillis() - start;
       LOG.info("flutter config --machine: " + duration + "ms");
@@ -584,6 +585,8 @@ public class FlutterSdk {
     else {
       LOG.info("Timeout when calling flutter config --machine");
     }
+
+     */
 
     return null;
   }
