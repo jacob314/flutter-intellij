@@ -13,6 +13,7 @@ import io.flutter.inspector.InspectorService;
 import org.dartlang.analysis.server.protocol.FlutterWidgetProperty;
 
 import java.awt.*;
+import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -37,7 +38,8 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
     return groups;
   }
 
-  ArrayList<DiagnosticsNode> _nodes;
+  public ArrayList<DiagnosticsNode> _nodes;
+  public int activeIndex = 0;
 
   WidgetViewModel(WidgetViewModelData data ) {
     this.data = data;
@@ -78,12 +80,16 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
   @Override
   public void forceRender() {
+    data.editor.getComponent().repaint(); // XXX repaint rect?
+    /*
     if (data.descriptor == null) {
       // TODO(just repaint the sreenshot area.
       data.editor.repaint(0, data.document.getTextLength());
       return;
     }
     data.editor.repaint(0, data.document.getTextLength());
+
+     */
 /*
     final TextRange marker = data.getMarker();
     if (marker == null) return;
@@ -107,17 +113,6 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
     if (value) {
       computeActiveElements();
-
-      final java.util.List<FlutterWidgetProperty> properties =
-        data.flutterDartAnalysisService.getWidgetDescription(data.editor.getVirtualFile(), data.descriptor.widget.getOffset());
-      /* XXX display properties UI.
-      if (properties != null && !properties.isEmpty()) {
-        System.out.println("XXX properties=" + properties);
-      } else {
-        System.out.println("XXX no properties");
-      }
-
-       */
     }
     return true;
   }
@@ -194,7 +189,8 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
     }
     group.safeWhenComplete(nodesFuture, (nextNodes, error) -> {
       if (error != null || isDisposed) {
-        _nodes = null;
+        setNodes(null);
+        activeIndex = 0;
         return;
       }
       InspectorObjectGroupManager manager = getGroups();
@@ -203,8 +199,30 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
         manager.cancelNext();
         // Continue using the current.
       } else {
+        // TODO(jacobr): simplify this logic.
+        if (_nodes != null && nextNodes !=null && _nodes.size() == nextNodes.size() && nextNodes.size() > 1) {
+          boolean found = false;
+          for (int i = 0; i < _nodes.size(); i++) {
+            if (nextNodes.get(0).getValueRef().equals(_nodes.get(i).getValueRef())) {
+              if (i <= activeIndex) {
+                // Hacky.. fixup as we went backwards.
+                activeIndex = Math.max(0, i - 1);
+              } else {
+                activeIndex = i;
+              }
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            activeIndex = 0;
+          }
+        } else {
+          activeIndex = 0;
+        }
         manager.promoteNext();
-        _nodes = nextNodes;
+        setNodes(nextNodes);
+
         onActiveNodesChanged();
       }
     });
@@ -217,6 +235,10 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
   public boolean isNodesEmpty() {
     return _nodes == null || _nodes.isEmpty() || isDisposed;
+  }
+
+  public void setNodes(ArrayList<DiagnosticsNode> nodes) {
+    _nodes = nodes;
   }
 
   public void onActiveNodesChanged() {

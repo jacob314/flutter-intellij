@@ -638,7 +638,7 @@ public class InspectorService implements Disposable {
       params.addProperty("maxPixelRatio", maxPixelRatio);
       params.addProperty("id", ref.getId());
 
-      return inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
+      return nullIfDisposed(() -> inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
         if (response == null || response.get("result").isJsonNull()) {
           System.out.println("XXX invalid json");
           return null;
@@ -666,7 +666,7 @@ public class InspectorService implements Disposable {
 
         final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
         return new Screenshot(image, transformedRect);
-      });
+      }));
     }
 
     public CompletableFuture<DiagnosticsNode> hoverAt(double x, double y) {

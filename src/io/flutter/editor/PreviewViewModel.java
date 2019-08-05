@@ -8,10 +8,8 @@ package io.flutter.editor;
 import com.intellij.openapi.editor.*;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
 import com.intellij.openapi.ui.popup.JBPopup;
-import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.ui.JBColor;
-import com.intellij.ui.awt.RelativePoint;
 import com.intellij.util.ui.UIUtil;
 import io.flutter.inspector.*;
 import io.flutter.utils.AsyncRateLimiter;
@@ -28,7 +26,7 @@ import static io.flutter.inspector.InspectorService.toSourceLocationUri;
 import static java.lang.Math.*;
 
 public class PreviewViewModel extends WidgetViewModel {
-  static final int PREVIEW_WIDTH = 240;
+  static final int PREVIEW_WIDTH = 280;
   static final int PREVIEW_HEIGHT = 320;
   public static final int PREVIEW_PADDING_X = 20;
   private JBPopup popup;
@@ -43,6 +41,9 @@ public class PreviewViewModel extends WidgetViewModel {
   private InspectorObjectGroupManager hover;
   static final Color SHADOW_COLOR = new Color(0, 0, 0, 64);
   private boolean screenshotDirty = false;
+  private int extraHeight = 0;
+  private boolean screenshotLoading;
+  private Point pendingPopupOpenLocation;
 
   AsyncRateLimiter getMouseRateLimiter() {
     if (mouseRateLimiter != null) return mouseRateLimiter;
@@ -65,8 +66,15 @@ public class PreviewViewModel extends WidgetViewModel {
 
   private Screenshot screenshot;
 
-  /// XXX rename to currentScreenshotBounds.
   Rectangle screenshotBounds;
+  Rectangle getScreenshotBoundsTight() {
+    // TODO(jacobr): cache this.
+    if (screenshotBounds == null || extraHeight == 0) return screenshotBounds;
+    Rectangle bounds = new Rectangle(screenshotBounds);
+    bounds.height -= extraHeight;
+    bounds.y += extraHeight;
+    return bounds;
+  }
   // Screenshot bounds in absolute window coordinates.
   Rectangle lastScreenshotBoundsWindow;
   private ArrayList<DiagnosticsNode> boxes;
@@ -92,7 +100,7 @@ public class PreviewViewModel extends WidgetViewModel {
 
   public CompletableFuture<?> updateMouse(boolean navigateTo) {
     final Screenshot latestScreenshot = getScreenshotNow();
-    if (screenshotBounds == null || latestScreenshot == null || lastPoint == null || !screenshotBounds.contains(lastPoint) || root == null) return CompletableFuture.completedFuture(null);
+    if (screenshotBounds == null || latestScreenshot == null || lastPoint == null || !getScreenshotBoundsTight().contains(lastPoint) || root == null) return CompletableFuture.completedFuture(null);
     InspectorObjectGroupManager hoverGroups = getHovers();
     hoverGroups.cancelNext();
     final InspectorService.ObjectGroup nextGroup = hoverGroups.getNext();
@@ -132,7 +140,15 @@ public class PreviewViewModel extends WidgetViewModel {
       }
       currentHits = hits;
       hoverGroups.promoteNext();
-
+      if (navigateTo && pendingPopupOpenLocation != null) {
+        DiagnosticsNode node = hits != null && hits.size() > 0 ? hits.get(0) : null;
+        if (node == null) {
+          // Maybe explain what happened
+        } else {
+          popup = PropertyEditorPanel.showPopup(node, null, data.flutterDartAnalysisService, pendingPopupOpenLocation);
+        }
+        pendingPopupOpenLocation = null;
+      }
       if (navigateTo && hits != null && hits.size() > 0) {
         /// XXX kindof the wrong group.
         getGroups().getCurrent().setSelection(hits.get(0).getValueRef(), false, false);
@@ -158,6 +174,9 @@ public class PreviewViewModel extends WidgetViewModel {
       //  a pixel selection feel.
       data.editor.setCustomCursor(this, Cursor.getPredefinedCursor(Cursor.DEFAULT_CURSOR));
       setMouseInScreenshot(true);
+      if (!getScreenshotBoundsTight().contains(lastPoint)) {
+        cancelHovers();
+      }
     }
     else {
       data.editor.setCustomCursor(this, null);
@@ -177,12 +196,14 @@ public class PreviewViewModel extends WidgetViewModel {
     registerLastEvent(event);
     if (_mouseInScreenshot) {
       event.consume();
+      if (getScreenshotBoundsTight().contains(lastPoint)) {
+        getMouseRateLimiter().scheduleRequest();
+      }
     }
-    getMouseRateLimiter().scheduleRequest();
   }
 
   boolean popupActive() {
-    return popup != null && !popup.isDisposed();
+    return popup != null && !popup.isDisposed() || pendingPopupOpenLocation != null;
   }
 
   private void _hidePopup() {
@@ -193,25 +214,42 @@ public class PreviewViewModel extends WidgetViewModel {
   }
   public void onMousePressed(MouseEvent event) {
     registerLastEvent(event);
+    final Point point = event.getPoint();
+    if (screenshotBounds != null && screenshotBounds.contains(point)) {
+      event.consume();
+    }
+  }
+
+  public void onMouseClicked(MouseEvent event) {
+    registerLastEvent(event);
 
     if (screenshotBounds == null) return;
-    if (screenshotBounds.contains(event.getPoint())) {
-      _hidePopup();
-      updateMouse(true);
-      // XXX only show popup after load of properties?
-      final Point topRight = event.getLocationOnScreen();
-      WidgetIndentsHighlightingPass.PropertyEditorPanel panel = new WidgetIndentsHighlightingPass.PropertyEditorPanel();
-      popup = JBPopupFactory.getInstance()
-        .createComponentPopupBuilder(panel, panel)
-        .setMovable(true)
-        .setAlpha(0.0f)
-        .setMinSize(new Dimension(200, 5))
-        // .setTitle("Properties")
-        .setCancelOnWindowDeactivation(true)
-        .setRequestFocus(true)
-        .createPopup();
-      popup.show(RelativePoint.fromScreen(topRight));
+    final Point point = event.getPoint();
+    if (screenshotBounds.contains(point)) {
+      Rectangle tightBounds = getScreenshotBoundsTight();
       event.consume();
+      if (tightBounds.contains(point)) {
+        _hidePopup();
+        updateMouse(true);
+        // XXX only show popup after load of properties?
+        pendingPopupOpenLocation = event.getLocationOnScreen();
+      } else {
+        // Title hit.
+        _hidePopup();
+        if (_nodes != null) {
+          if (_nodes.size() > 1) {
+            int newIndex = this.activeIndex + 1;
+            if (newIndex >= _nodes.size()) {
+              newIndex = 1; // Wrap around hack case because the first index is out of order.
+            }
+            // TODO(jacobr): we could update activeIndex now instead of waitng for the UI to update.
+            getGroups().getCurrent().setSelection(_nodes.get(newIndex).getValueRef(), false, true);
+          } else if (_nodes.size() == 1) {
+            // Select current.
+            getGroups().getCurrent().setSelection(_nodes.get(0).getValueRef(), false, true);
+          }
+        }
+      }
     }
   }
 
@@ -231,6 +269,10 @@ public class PreviewViewModel extends WidgetViewModel {
   public void _mouseOutOfScreenshot() {
     setMouseInScreenshot(false);
     lastPoint = null; // XXX?
+    cancelHovers();
+  }
+
+  public void cancelHovers() {
     hover = getHovers();
     if (hover != null) {
       hover.cancelNext();
@@ -262,15 +304,20 @@ public class PreviewViewModel extends WidgetViewModel {
     }
   }
 
+  float previewWidthScale = 0.7f;
+
   public void computeScreenshotBounds() {
     Rectangle previousScreenshotBounds = screenshotBounds;
     screenshotBounds = null;
     maxHeight = PREVIEW_HEIGHT;
+    final WidgetIndentGuideDescriptor descriptor = getDescriptor();
 
-    if (data.descriptor == null) {
+    final int lineHeight = data.editor.getLineHeight();
+    extraHeight = descriptor != null && screenshot != null ? lineHeight: 0;
+
+    if (descriptor == null) {
       // Special case to float in the bottom right corner.
       Screenshot latestScreenshot = getScreenshotNow();
-      float previewWidthScale = 0.7f;
       int previewWidth = round(PREVIEW_WIDTH * previewWidthScale);
       int previewHeight = round(PREVIEW_HEIGHT * previewWidthScale);
       if (latestScreenshot != null) {
@@ -297,7 +344,6 @@ public class PreviewViewModel extends WidgetViewModel {
 
     int off;
     int startLine = doc.getLineNumber(startOffset);
-    final int lineHeight = data.editor.getLineHeight();
 
     int widgetOffset = data.descriptor.widget.getOffset();
     int widgetLine = doc.getLineNumber(widgetOffset);
@@ -319,9 +365,7 @@ public class PreviewViewModel extends WidgetViewModel {
     int visibleStart = visibleRect.y;
     int visibleEnd = (int)visibleRect.getMaxY();
 
-    final WidgetIndentGuideDescriptor descriptor = getDescriptor();
     // Add extra room for the descriptor.
-    int extraHeight = descriptor != null && screenshot != null ? lineHeight : 0;
     final Screenshot latestScreenshot = getScreenshotNow();
     int previewWidth = PREVIEW_WIDTH;
     int previewHeight = PREVIEW_HEIGHT;
@@ -344,6 +388,14 @@ public class PreviewViewModel extends WidgetViewModel {
         // TODO(jacobr): also need to keep sticky if there is some minor scrolling
         if (previousScreenshotBounds != null && visibleRect.contains(previousScreenshotBounds)) {
           screenshotBounds = new Rectangle(previousScreenshotBounds);
+
+          // Fixup if the screenshot changed
+          if (previewWidth != screenshotBounds.width) {
+            screenshotBounds.x += screenshotBounds.width - previewWidth;
+            screenshotBounds.width = previewWidth;
+          }
+          screenshotBounds.height = previewHeight;
+
           // XXX dupe code.
           lastScreenshotBoundsWindow = new Rectangle(screenshotBounds);
           lastScreenshotBoundsWindow.translate(-visibleRect.x, -visibleRect.y);
@@ -433,7 +485,7 @@ public class PreviewViewModel extends WidgetViewModel {
    */
   private Matrix4 buildTransformToScreenshot(Screenshot latestScreenshot) {
     final Matrix4 matrix = Matrix4.identity();
-    matrix.translate(screenshotBounds.x, screenshotBounds.y, 0);
+    matrix.translate(screenshotBounds.x, screenshotBounds.y + extraHeight, 0);
     final Rectangle2D imageRect = latestScreenshot.transformedRect.getRectangle();
     final double centerX = imageRect.getCenterX();
     final double centerY = imageRect.getCenterY();
@@ -455,6 +507,13 @@ public class PreviewViewModel extends WidgetViewModel {
       computeScreenshotBounds();
       forceRender();
     }
+  }
+
+  @Override
+  public void setNodes(ArrayList<DiagnosticsNode> nodes) {
+    super.setNodes(nodes);
+    currentHits = null;
+    boxes = null;
   }
 
   @Override
@@ -482,7 +541,11 @@ public class PreviewViewModel extends WidgetViewModel {
         }
       });
     }
-    fetchScreenshot();
+    if (getDescriptor() == null && screenshot != null) {
+      return;
+    }
+
+    fetchScreenshot(true);
   }
 
   boolean hasCurrentHits() {
@@ -492,7 +555,7 @@ public class PreviewViewModel extends WidgetViewModel {
   @Override
   public void onMaybeFetchScreenshot() {
     if (screenshot == null || screenshotDirty) {
-      fetchScreenshot();;
+      fetchScreenshot(false);;
     }
   }
 
@@ -517,35 +580,45 @@ public class PreviewViewModel extends WidgetViewModel {
 
     if (screenshot == null && _nodes == null || _nodes.isEmpty()) {
       priority -= 5;
+      if (getDescriptor() != null) {
+        priority -= 100;
+      }
     } else {
       if (hasCurrentHits() || _mouseInScreenshot) {
         priority += 10;
       }
     }
     if (_mouseInScreenshot) {
-      priority += 2000;
+      priority += 20;
     }
     return priority;
   }
 
-  void fetchScreenshot() {
+  void fetchScreenshot(boolean mightBeIncompatible) {
     screenshotDirty = false;
+    if (mightBeIncompatible) {
+      screenshotLoading = true;
+    }
     InspectorObjectGroupManager groups = getGroups();
     if (isNodesEmpty() || groups == null) {
       clearScreenshot();
       return;
     }
     final InspectorService.ObjectGroup group = groups.getCurrent();
-    int height = PREVIEW_HEIGHT;
-    if (screenshotBounds != null) {
-      // Unless something went horribly wrong
-      height = max(screenshotBounds.height, 80); // XXX arbitrary.
+    int previewWidth = PREVIEW_WIDTH;
+    int previewHeight = PREVIEW_HEIGHT;
+
+    if (getDescriptor() == null) {
+      previewWidth = round(previewWidth * previewWidthScale);
+      previewHeight = round(previewHeight * previewWidthScale);
     }
+
     group.safeWhenComplete(
-      group.getScreenshot(root.getValueRef(), toPixels(PREVIEW_WIDTH), toPixels(height), getDPI()),
+      group.getScreenshot(root.getValueRef(), toPixels(previewWidth), toPixels(previewHeight), getDPI() * 0.7), // XXX 0.7 is a hack to demo better.
       (s, e2) -> {
         if (e2 != null) return;
         screenshot = s;
+        screenshotLoading = false;
         // This calculation might be out of date due to the new screenshot.
         computeScreenshotBounds();
         forceRender();
@@ -565,6 +638,7 @@ public class PreviewViewModel extends WidgetViewModel {
     if (data.descriptor != null && !data.descriptor.widget.isValid()) {
       return;
     }
+    final WidgetIndentGuideDescriptor descriptor = getDescriptor();
 
     final Graphics2D g2d = (Graphics2D)g.create();
     // Required to render colors with an alpha channel. Rendering with an
@@ -610,7 +684,7 @@ public class PreviewViewModel extends WidgetViewModel {
     }
     g2d.clip(screenshotBounds);
 
-    final Font font = UIUtil.getFont(UIUtil.FontSize.NORMAL, UIUtil.getTreeFont());
+    final Font font = UIUtil.getFont(UIUtil.FontSize.MINI, UIUtil.getTreeFont());
     g2d.setFont(font);
     // Request a thumbnail and render it in the space available.
 
@@ -621,11 +695,47 @@ public class PreviewViewModel extends WidgetViewModel {
       imageWidth = (int)(latestScreenshot.image.getWidth() * getDPI());
       imageHeight = (int)(latestScreenshot.image.getHeight() * getDPI());
       g2d.setColor(Color.WHITE);
-      g2d.fillRect(screenshotBounds.x, screenshotBounds.y, min(screenshotBounds.width, imageWidth), min(screenshotBounds.height, imageHeight));
-      g2d.drawImage(latestScreenshot.image, new AffineTransform(1 / getDPI(), 0f, 0f, 1 / getDPI(), screenshotBounds.x, screenshotBounds.y), null);
+      g2d.fillRect(screenshotBounds.x, screenshotBounds.y + extraHeight, min(screenshotBounds.width, imageWidth), min(screenshotBounds.height, imageHeight - extraHeight));
+      if (extraHeight > 0) {
+        g2d.setColor(Color.LIGHT_GRAY);
+        g2d.fillRect(screenshotBounds.x, screenshotBounds.y, min(screenshotBounds.width, imageWidth), min(screenshotBounds.height, extraHeight));
+        // XXX should be no else.
+        if (descriptor != null) {
+          final int line = descriptor.widget.getLine() + 1;
+          final int column = descriptor.widget.getColumn() + 1;
+          int numActive = _nodes != null ? _nodes.size() : 0;
+          String message = descriptor.outlineNode.getClassName() + " " ;//+ " Widget ";
+          if (numActive == 0) {
+            message += "(inactive)";
+          } else if (numActive == 1) {
+//            message += "(active)";
+          } else {
+//            message += "(" + (activeIndex + 1) + " of " + numActive + " active)";
+            message += "(" + (activeIndex + 1) + " of " + numActive + ")";
+          }
+          if (numActive > 0 && screenshot != null && screenshot.transformedRect != null) {
+            Rectangle2D bounds = screenshot.transformedRect.getRectangle();
+            long w = Math.round(bounds.getWidth());
+            long h = Math.round(bounds.getHeight());
+            message += " " + w + "x" + h;
+          }
+
+          g2d.setColor(Color.BLACK);
+          drawMultilineString(g2d,
+                              message,
+                              screenshotBounds.x + 4,
+                              screenshotBounds.y + lineHeight - 6, lineHeight);
+        }
+      }
+      g2d.clip(getScreenshotBoundsTight());
+
+
+      g2d.drawImage(latestScreenshot.image, new AffineTransform(1 / getDPI(), 0f, 0f, 1 / getDPI(), screenshotBounds.x, screenshotBounds.y + extraHeight), null);
 
       final java.util.List<DiagnosticsNode> nodesToHighlight = getNodesToHighlight();
-      if (nodesToHighlight != null && nodesToHighlight.size() > 0) {
+      // Sometimes it is fine to display even if we are loading.
+      // TODO(jacobr): be smarter and track if the highlights are associated with a different screenshot.
+      if (nodesToHighlight != null && nodesToHighlight.size() > 0) { //&& !screenshotLoading) {
         boolean first = true;
         for (DiagnosticsNode box : nodesToHighlight) {
           final TransformedRect transform = box.getTransformToRoot();
@@ -650,7 +760,8 @@ public class PreviewViewModel extends WidgetViewModel {
               polygon.addPoint((int)Math.round(point.getX()), (int)Math.round(point.getY()));
             }
 
-            if (first) {
+            if (first && _nodes.size() > 0 && !box.getValueRef().equals(_nodes.get(0).getValueRef()))
+            {
               g2d.setColor(WidgetIndentsHighlightingPass.HIGHLIGHTED_RENDER_OBJECT_BORDER_COLOR);
               g2d.fillPolygon(polygon);
             }
@@ -666,15 +777,14 @@ public class PreviewViewModel extends WidgetViewModel {
       g2d.setColor(isSelected ? JBColor.GRAY: JBColor.LIGHT_GRAY);
       g2d.fillRect(screenshotBounds.x, screenshotBounds.y, screenshotBounds.width, screenshotBounds.height);
       g2d.setColor(WidgetIndentsHighlightingPass.SHADOW_GRAY);
-      WidgetIndentGuideDescriptor descriptor = getDescriptor();
+      g2d.setColor(JBColor.BLACK);
       if (descriptor == null) {
         String message = getInspectorService() == null ? "Run the application to\nactivate device mirror." : "Loading...";
         drawMultilineString(g2d, message, screenshotBounds.x + 4, screenshotBounds.y + + lineHeight - 4, lineHeight);
       } else {
         final int line = descriptor.widget.getLine() + 1;
         final int column = descriptor.widget.getColumn() + 1;
-        drawMultilineString(g2d,
-       "Widget " + descriptor.outlineNode.getClassName() + ":" + line + ":" + column + "\n"+
+        drawMultilineString(g2d, descriptor.outlineNode.getClassName() + " Widget " + line + ":" + column + "\n"+
                             "not currently active",
                             screenshotBounds.x + 4,
                             screenshotBounds.y + +lineHeight - 4, lineHeight);

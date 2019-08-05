@@ -28,6 +28,7 @@ public interface WidgetViewModeInterface extends CustomHighlighterRenderer {
   void onMouseMoved(MouseEvent event);
 
   void onMousePressed(MouseEvent event);
+  void onMouseClicked(MouseEvent event);
 
   void onMouseEntered(MouseEvent event);
 

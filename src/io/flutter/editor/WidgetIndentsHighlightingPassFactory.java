@@ -137,6 +137,13 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
       }
 
       @Override
+      public void mouseReleased(@NotNull EditorMouseEvent event) {
+        final EditorEx editorEx = getIfValidForProject(event.getEditor());
+        if (editorEx == null) return;
+        WidgetIndentsHighlightingPass.onMouseClicked(editorEx, event.getMouseEvent());
+      }
+
+      @Override
       public void mouseEntered(@NotNull EditorMouseEvent event) {
         final EditorEx editorEx = getIfValidForProject(event.getEditor());
         if (editorEx == null) return;

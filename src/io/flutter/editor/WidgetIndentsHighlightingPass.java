@@ -12,6 +12,8 @@ import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.editor.markup.*;
 import com.intellij.openapi.progress.ProgressManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.popup.JBPopup;
+import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.Segment;
 import com.intellij.openapi.util.TextRange;
@@ -21,26 +23,34 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.ui.Gray;
 import com.intellij.ui.JBColor;
+import com.intellij.ui.awt.RelativePoint;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBPanel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.components.panels.VerticalLayout;
+import com.intellij.uiDesigner.core.GridLayoutManager;
 import com.intellij.util.DocumentUtil;
 import com.intellij.util.ui.JBUI;
+import com.intellij.xdebugger.XSourcePosition;
+import com.intellij.xdebugger.impl.XSourcePositionImpl;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import com.jetbrains.lang.dart.psi.*;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.inspector.*;
 import io.flutter.settings.FlutterSettings;
+import net.miginfocom.swing.MigLayout;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
 import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
+import org.dartlang.analysis.server.protocol.FlutterWidgetProperty;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.util.List;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 import static java.lang.Math.*;
 
@@ -117,16 +127,6 @@ public class WidgetIndentsHighlightingPass {
    * When this debugging flag is true, problematic text ranges are reported.
    */
   private final static boolean DEBUG_WIDGET_INDENTS = false;
-
-  public static class PropertyEditorPanel extends JBPanel {
-    public PropertyEditorPanel() {
-      super(new VerticalLayout(5));
-      setBorder(JBUI.Borders.empty(5));
-      add(new JBLabel("Properties"));
-      add(new JBTextField("COLOR"));
-
-    }
-  }
 
   private final EditorEx myEditor;
   private final Document myDocument;
@@ -278,6 +278,15 @@ public class WidgetIndentsHighlightingPass {
     }
   }
 
+  public static void onMouseClicked(EditorEx editor, MouseEvent event) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
+
+    for (WidgetViewModeInterface renderer : data.getRenderers()) {
+      renderer.onMouseClicked(event);
+      if (event.isConsumed()) break;
+    }
+  }
   public static void onMouseEntered(EditorEx editor, MouseEvent event) {
     final WidgetIndentsPassData data = getIndentsPassData(editor);
     if (data == null || data.highlighters == null) return;

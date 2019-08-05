@@ -68,6 +68,11 @@ public class WidgetCustomHighlighterRenderer extends WidgetViewModel implements 
   }
 
   @Override
+  public void onMouseClicked(MouseEvent event) {
+
+  }
+
+  @Override
   public void onMouseEntered(MouseEvent event) {
 
   }

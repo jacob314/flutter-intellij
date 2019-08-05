@@ -7,15 +7,19 @@ package io.flutter.editor;
 
 import com.intellij.openapi.editor.Caret;
 import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
+import com.intellij.openapi.ui.popup.JBPopup;
+import com.intellij.xdebugger.impl.XSourcePositionImpl;
 import org.jetbrains.annotations.NotNull;
 
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
-import java.util.Collections;
 
 public class PreviewsForEditor implements WidgetViewModeInterface {
+
+  private JBPopup popup;
 
   public PreviewsForEditor(WidgetViewModelDataBase data) {
     this.data= data;
@@ -137,6 +141,28 @@ public class PreviewsForEditor implements WidgetViewModeInterface {
   public void onMousePressed(MouseEvent event) {
     for (PreviewViewModel preview : getAllPreviews(false)) {
       preview.onMousePressed(event);
+      if (event.isConsumed()) break;
+    }
+    if (!event.isConsumed() && event.isControlDown()) {
+      event.consume();
+      final LogicalPosition logicalPosition = data.editor.xyToLogicalPosition(event.getPoint());
+      System.out.println("XXX logicalPosition = " + logicalPosition);
+
+      XSourcePositionImpl position = XSourcePositionImpl.create(data.editor.getVirtualFile(), logicalPosition.line, logicalPosition.column);
+      Point point = event.getLocationOnScreen();
+
+      popup = PropertyEditorPanel.showPopup(null, position, data.flutterDartAnalysisService, point);
+    } else {
+      if (popup != null) {
+        popup.cancel();
+      }
+    }
+  }
+
+  @Override
+  public void onMouseClicked(MouseEvent event) {
+    for (PreviewViewModel preview : getAllPreviews(false)) {
+      preview.onMouseClicked(event);
       if (event.isConsumed()) break;
     }
   }
