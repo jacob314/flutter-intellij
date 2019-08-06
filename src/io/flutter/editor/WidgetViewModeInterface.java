@@ -35,4 +35,6 @@ public interface WidgetViewModeInterface extends CustomHighlighterRenderer {
   void onMouseExited(MouseEvent event);
 
   void updateSelected(Caret carat);
+
+  void onFlutterFrame();
 }

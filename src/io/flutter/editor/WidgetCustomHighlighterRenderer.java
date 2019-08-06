@@ -89,6 +89,11 @@ public class WidgetCustomHighlighterRenderer extends WidgetViewModel implements 
     }
   }
 
+  @Override
+  public void onFlutterFrame() {
+
+  }
+
   boolean updateSelectedHelper(Caret carat) {
     if (carat == null) {
       return setSelection(false);

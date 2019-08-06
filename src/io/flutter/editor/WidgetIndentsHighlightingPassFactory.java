@@ -239,11 +239,6 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
         requestRepaint(true);
       }
 
-      @Override
-      public void notifyFrameRendered() {
-        // requestRepaint(false);
-      }
-
       public void notifyVmServiceAvailable(VmService vmService) {
         // XXX run this method on the main thread.
  //       setupConnection(vmService);
@@ -267,7 +262,11 @@ public class WidgetIndentsHighlightingPassFactory implements TextEditorHighlight
 
             @Override
             public void onFlutterFrame() {
-              // requestRepaint(false); // XXX too much.
+              AsyncUtils.invokeLater(() -> {
+                for (EditorEx editor : getActiveDartEditors()) {
+                  WidgetIndentsHighlightingPass.onFlutterFrame(editor);
+                }
+              });
             }
             @Override
             public CompletableFuture<?> onForceRefresh() {

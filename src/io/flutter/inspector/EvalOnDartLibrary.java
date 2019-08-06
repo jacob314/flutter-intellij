@@ -31,12 +31,16 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Invoke methods from a specified Dart library using the observatory protocol.
  */
 public class EvalOnDartLibrary implements Disposable {
   private final StreamSubscription<IsolateRef> subscription;
+  private final ScheduledThreadPoolExecutor delayer;
   private String isolateId;
   private final VmService vmService;
   @SuppressWarnings("FieldCanBeLocal") private final VMServiceManager vmServiceManager;
@@ -76,7 +80,7 @@ public class EvalOnDartLibrary implements Disposable {
     }
 
     // Future that completes when the request has finished.
-    final CompletableFuture<T> response = new CompletableFuture<>();
+    final CompletableFuture<T> response = timeoutAfter(5, TimeUnit.SECONDS);
     // This is an optimization to avoid sending stale requests across the wire.
     final Runnable wrappedRequest = () -> {
       if (isAlive != null && isAlive.isDisposed()) {
@@ -124,6 +128,7 @@ public class EvalOnDartLibrary implements Disposable {
         initialize(isolate.getId());
       }
     }, true);
+    delayer = new ScheduledThreadPoolExecutor(1);
   }
 
   public String getIsolateId() {
@@ -141,7 +146,7 @@ public class EvalOnDartLibrary implements Disposable {
   }
 
   public CompletableFuture<JsonObject> invokeServiceMethod(String method, JsonObject params) {
-    CompletableFuture<JsonObject> ret = new CompletableFuture<>();
+    CompletableFuture<JsonObject> ret = timeoutAfter(2, TimeUnit.SECONDS);
     vmService.callServiceExtension(isolateId, method, params, new ServiceExtensionConsumer() {
 
       @Override
@@ -156,11 +161,20 @@ public class EvalOnDartLibrary implements Disposable {
         ret.complete(object);
       }
     });
+
     return ret;
   }
 
+  // TODO(jacobr): remove this method after we switch to Java9+ which supports
+  //  this method directly on CompletableFuture.
+  public <T> CompletableFuture<T> timeoutAfter(long timeout, TimeUnit unit) {
+    CompletableFuture<T> result = new CompletableFuture<T>();
+    delayer.schedule(() -> result.completeExceptionally(new TimeoutException()), timeout, unit);
+    return result;
+  }
+
   public CompletableFuture<JsonObject> invokeServiceMethod(String method) {
-    CompletableFuture<JsonObject> ret = new CompletableFuture<>();
+    CompletableFuture<JsonObject> ret = timeoutAfter(2, TimeUnit.SECONDS);
     vmService.callServiceExtension(isolateId, method, new ServiceExtensionConsumer() {
 
       @Override

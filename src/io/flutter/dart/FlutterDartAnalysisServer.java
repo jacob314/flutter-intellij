@@ -34,6 +34,7 @@ public class FlutterDartAnalysisServer {
 
   @NotNull final DartAnalysisServerService analysisService;
 
+  public DartAnalysisServerService getAnalysisService() { return analysisService; }
   /**
    * Each key is a notification identifier.
    * Each value is the set of files subscribed to the notification.
@@ -137,14 +138,14 @@ public class FlutterDartAnalysisServer {
 
 
   @Nullable
-  public boolean setWidgetPropertyValue(int propertyId, FlutterWidgetPropertyValue value) {
+  public SourceChange setWidgetPropertyValue(int propertyId, FlutterWidgetPropertyValue value) {
     final CountDownLatch latch = new CountDownLatch(1);
-    final AtomicReference<Boolean> result = new AtomicReference<>();
+    final AtomicReference<SourceChange> result = new AtomicReference<>();
     final String id = analysisService.generateUniqueId();
     responseConsumers.put(id, (resultObject) -> {
       try {
-        final JsonArray propertiesObject = resultObject.getAsJsonArray("properties");
-        result.set(true);
+        final JsonObject propertiesObject = resultObject.getAsJsonObject("change");
+        result.set(SourceChange.fromJson(propertiesObject));
       }
       catch (Throwable ignored) {
       }

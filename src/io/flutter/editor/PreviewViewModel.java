@@ -7,7 +7,7 @@ package io.flutter.editor;
 
 import com.intellij.openapi.editor.*;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
-import com.intellij.openapi.ui.popup.JBPopup;
+import com.intellij.openapi.ui.popup.Balloon;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.ui.JBColor;
 import com.intellij.util.ui.UIUtil;
@@ -15,6 +15,7 @@ import io.flutter.inspector.*;
 import io.flutter.utils.AsyncRateLimiter;
 import org.jetbrains.annotations.NotNull;
 
+import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.geom.AffineTransform;
@@ -26,29 +27,61 @@ import static io.flutter.inspector.InspectorService.toSourceLocationUri;
 import static java.lang.Math.*;
 
 public class PreviewViewModel extends WidgetViewModel {
-  static final int PREVIEW_WIDTH = 280;
-  static final int PREVIEW_HEIGHT = 320;
+  static final int PREVIEW_MAX_WIDTH = 280;
+  static final int PREVIEW_MAX_HEIGHT = 520;
   public static final int PREVIEW_PADDING_X = 20;
-  private JBPopup popup;
+  private Balloon popup;
   private Point lastPoint;
   private ArrayList<DiagnosticsNode> currentHits;
 
   private AsyncRateLimiter mouseRateLimiter;
+  private AsyncRateLimiter screenshotRateLimiter;
   public static final double MOUSE_FRAMES_PER_SECOND = 10.0;
+  public static final double SCREENSHOT_FRAMES_PER_SECOND = 5.0;
   private boolean controlDown;
   private boolean shiftDown;
 
   private InspectorObjectGroupManager hover;
+  private InspectorService.ObjectGroup screenshotGroup;
+
   static final Color SHADOW_COLOR = new Color(0, 0, 0, 64);
   private boolean screenshotDirty = false;
   private int extraHeight = 0;
   private boolean screenshotLoading;
   private Point pendingPopupOpenLocation;
+  private MouseEvent pendingPopupMouseEvent;
+  private boolean altDown;
 
+  void dispose() {
+    super.dispose();
+    if (mouseRateLimiter != null) {
+      mouseRateLimiter.dispose();;
+      mouseRateLimiter = null;
+    }
+    if (screenshotRateLimiter != null) {
+      screenshotRateLimiter.dispose();;
+      screenshotRateLimiter = null;
+    }
+    if (popup != null) {
+      popup.dispose();;
+      popup = null;
+    }
+    if (hover != null) {
+      hover.clear(false);
+      hover = null;
+    }
+    screenshot = null;
+  }
   AsyncRateLimiter getMouseRateLimiter() {
     if (mouseRateLimiter != null) return mouseRateLimiter;
     mouseRateLimiter = new AsyncRateLimiter(MOUSE_FRAMES_PER_SECOND, () -> { return updateMouse(false); });
     return mouseRateLimiter;
+  }
+
+  AsyncRateLimiter getScreenshotRateLimiter() {
+    if (screenshotRateLimiter != null) return screenshotRateLimiter;
+    screenshotRateLimiter = new AsyncRateLimiter(SCREENSHOT_FRAMES_PER_SECOND, () -> { return updateScreenshot(); });
+    return screenshotRateLimiter;
   }
 
   public InspectorObjectGroupManager getHovers() {
@@ -58,6 +91,15 @@ public class PreviewViewModel extends WidgetViewModel {
     if (getInspectorService() == null) return null;
     hover = new InspectorObjectGroupManager(getInspectorService(), "hover");
     return hover;
+  }
+
+  public InspectorService.ObjectGroup getScreenshotGroup() {
+    if (screenshotGroup != null && screenshotGroup.getInspectorService() == getInspectorService()) {
+      return screenshotGroup;
+    }
+    if (getInspectorService() == null) return null;
+    screenshotGroup =  getInspectorService().createObjectGroup("screenshot");
+    return screenshotGroup;
   }
 
   // XXX hard coded for Macbooks.
@@ -129,6 +171,8 @@ public class PreviewViewModel extends WidgetViewModel {
 
     final CompletableFuture<ArrayList<DiagnosticsNode>> hitResults = nextGroup.hitTest(root, point.getX(), point.getY(), file, startLine, endLine);
     nextGroup.safeWhenComplete(hitResults, (hits, error) -> {
+      if (isDisposed) return;
+
       if (error != null) {
         System.out.println("Got error:" + error);
         return;
@@ -145,7 +189,22 @@ public class PreviewViewModel extends WidgetViewModel {
         if (node == null) {
           // Maybe explain what happened
         } else {
-          popup = PropertyEditorPanel.showPopup(node, null, data.flutterDartAnalysisService, pendingPopupOpenLocation);
+          _hidePopup();
+          if (shiftDown) {
+            final TransformedRect transform = node.getTransformToRoot();
+            if (transform != null) {
+              double x, y;
+              final Matrix4 transformMatrix = buildTransformToScreenshot(latestScreenshot);
+              transformMatrix.multiply(transform.getTransform());
+              Rectangle2D rect = transform.getRectangle();
+              Vector3 transformed = transformMatrix.perspectiveTransform(new Vector3(new double[]{rect.getCenterX(), rect.getMaxY(), 0}));
+              pendingPopupOpenLocation = new Point((int)Math.round(transformed.getX()), (int)Math.round(transformed.getY() + 1));
+              pendingPopupOpenLocation =
+                SwingUtilities.convertPoint(data.editor.getContentComponent(), pendingPopupOpenLocation, data.editor.getComponent());
+            }
+            popup = PropertyEditorPanel
+              .showPopup(data.getApp(), data.editor, node, null, data.flutterDartAnalysisService, pendingPopupOpenLocation);
+          }
         }
         pendingPopupOpenLocation = null;
       }
@@ -188,6 +247,7 @@ public class PreviewViewModel extends WidgetViewModel {
     lastPoint = event.getPoint();
     controlDown = event.isControlDown();
     shiftDown = event.isShiftDown();
+    altDown = event.isAltDown();
     updateMouseCursor();
   }
 
@@ -231,8 +291,11 @@ public class PreviewViewModel extends WidgetViewModel {
       if (tightBounds.contains(point)) {
         _hidePopup();
         updateMouse(true);
-        // XXX only show popup after load of properties?
-        pendingPopupOpenLocation = event.getLocationOnScreen();
+        if (shiftDown) {
+          // XXX only show popup after load of properties?
+          pendingPopupOpenLocation = SwingUtilities.convertPoint(event.getComponent(), event.getPoint(), data.editor.getComponent());
+          pendingPopupMouseEvent = event;
+        }
       } else {
         // Title hit.
         _hidePopup();
@@ -257,6 +320,7 @@ public class PreviewViewModel extends WidgetViewModel {
     lastPoint = null;
     controlDown = false;
     shiftDown = false;
+    altDown = false;
     setMouseInScreenshot(false);
     updateMouseCursor();
   }
@@ -264,6 +328,11 @@ public class PreviewViewModel extends WidgetViewModel {
   @Override
   public void updateSelected(Caret carat) {
 
+  }
+
+  @Override
+  public void onFlutterFrame() {
+    fetchScreenshot(false);
   }
 
   public void _mouseOutOfScreenshot() {
@@ -278,6 +347,7 @@ public class PreviewViewModel extends WidgetViewModel {
       hover.cancelNext();
       controlDown = false;
       shiftDown = false;
+      altDown = false;
     }
     if (currentHits != null) {
       currentHits = null;
@@ -301,6 +371,10 @@ public class PreviewViewModel extends WidgetViewModel {
         // XXX call a helper instead.
         onActiveNodesChanged();
       }
+      if (screenshot == null || screenshotDirty) {
+        System.out.println("XXX fetching screenshot due to visiblity change");
+        fetchScreenshot(false);
+      }
     }
   }
 
@@ -309,7 +383,7 @@ public class PreviewViewModel extends WidgetViewModel {
   public void computeScreenshotBounds() {
     Rectangle previousScreenshotBounds = screenshotBounds;
     screenshotBounds = null;
-    maxHeight = PREVIEW_HEIGHT;
+    maxHeight = PREVIEW_MAX_HEIGHT / 6;
     final WidgetIndentGuideDescriptor descriptor = getDescriptor();
 
     final int lineHeight = data.editor.getLineHeight();
@@ -318,8 +392,8 @@ public class PreviewViewModel extends WidgetViewModel {
     if (descriptor == null) {
       // Special case to float in the bottom right corner.
       Screenshot latestScreenshot = getScreenshotNow();
-      int previewWidth = round(PREVIEW_WIDTH * previewWidthScale);
-      int previewHeight = round(PREVIEW_HEIGHT * previewWidthScale);
+      int previewWidth = round(PREVIEW_MAX_WIDTH * previewWidthScale);
+      int previewHeight = round((PREVIEW_MAX_HEIGHT / 6) * previewWidthScale);
       if (latestScreenshot != null) {
         previewWidth = (int)(latestScreenshot.image.getWidth() / getDPI());
         previewHeight = (int)(latestScreenshot.image.getHeight() / getDPI());
@@ -367,8 +441,8 @@ public class PreviewViewModel extends WidgetViewModel {
 
     // Add extra room for the descriptor.
     final Screenshot latestScreenshot = getScreenshotNow();
-    int previewWidth = PREVIEW_WIDTH;
-    int previewHeight = PREVIEW_HEIGHT;
+    int previewWidth = PREVIEW_MAX_WIDTH;
+    int previewHeight = PREVIEW_MAX_HEIGHT / 6;
     if (latestScreenshot != null) {
       previewWidth = (int)(latestScreenshot.image.getWidth() / getDPI());
       previewHeight = (int)(latestScreenshot.image.getHeight() / getDPI());
@@ -530,6 +604,8 @@ public class PreviewViewModel extends WidgetViewModel {
     final InspectorService.ObjectGroup group = getGroups().getCurrent();
     if (data.data.inspectorSelection != null) {
       group.safeWhenComplete(group.getBoundingBoxes(root, data.data.inspectorSelection), (boxes, selectionError) -> {
+        if (isDisposed) return;
+
         if (selectionError != null) {
           this.boxes = null;
           forceRender(); // XXX needed?
@@ -578,7 +654,7 @@ public class PreviewViewModel extends WidgetViewModel {
       priority += 1;
     }
 
-    if (screenshot == null && _nodes == null || _nodes.isEmpty()) {
+    if (screenshot == null && (_nodes == null || _nodes.isEmpty())) {
       priority -= 5;
       if (getDescriptor() != null) {
         priority -= 100;
@@ -595,35 +671,63 @@ public class PreviewViewModel extends WidgetViewModel {
   }
 
   void fetchScreenshot(boolean mightBeIncompatible) {
-    screenshotDirty = false;
     if (mightBeIncompatible) {
       screenshotLoading = true;
     }
+    screenshotDirty = true;
+    if (!visible) return;
+
     InspectorObjectGroupManager groups = getGroups();
     if (isNodesEmpty() || groups == null) {
       clearScreenshot();
       return;
     }
-    final InspectorService.ObjectGroup group = groups.getCurrent();
-    int previewWidth = PREVIEW_WIDTH;
-    int previewHeight = PREVIEW_HEIGHT;
+
+    getScreenshotRateLimiter().scheduleRequest();
+  }
+
+  CompletableFuture<InspectorService.ScreenshotBoxesPair> updateScreenshot() {
+    final InspectorService.ObjectGroup group = getScreenshotGroup();
+    int previewWidth = PREVIEW_MAX_WIDTH;
+    int previewHeight = PREVIEW_MAX_HEIGHT;
 
     if (getDescriptor() == null) {
       previewWidth = round(previewWidth * previewWidthScale);
       previewHeight = round(previewHeight * previewWidthScale);
     }
 
+    System.out.println("XXX fetching screenshot for " + root.getDescription() +" -- " + data.editor.getVirtualFile().getPath());
+    long startTime = System.currentTimeMillis();
+    CompletableFuture<InspectorService.ScreenshotBoxesPair> screenshotFuture =
+      group.getScreenshotWithSelection(root,  data.data.inspectorSelection, toPixels(previewWidth), toPixels(previewHeight), getDPI() * 0.7);
     group.safeWhenComplete(
-      group.getScreenshot(root.getValueRef(), toPixels(previewWidth), toPixels(previewHeight), getDPI() * 0.7), // XXX 0.7 is a hack to demo better.
-      (s, e2) -> {
-        if (e2 != null) return;
-        screenshot = s;
+      screenshotFuture, // XXX 0.7 is a hack to demo better.
+      (pair, e2) -> {
+        if (e2 != null) {
+          System.out.println("XXX skipping due to " + e2);
+        }
+        if (e2 != null || isDisposed) return;
+        long endTime = System.currentTimeMillis();
+        String name = "???";
+        if (root != null) {
+          name = root.getDescription();
+        }
+        System.out.println("XXX took " + (endTime-startTime) + "ms to fetch screenshot for " + name + " -- " + data.editor.getVirtualFile().getPath());
+        if (pair == null) {
+          screenshot = null;
+          boxes = null;
+        } else {
+          screenshot = pair.screenshot;
+          boxes = pair.boxes;
+        }
+        screenshotDirty = false;
         screenshotLoading = false;
         // This calculation might be out of date due to the new screenshot.
         computeScreenshotBounds();
         forceRender();
       }
     );
+    return screenshotFuture;
   }
 
   @Override
@@ -670,10 +774,11 @@ public class PreviewViewModel extends WidgetViewModel {
     int imageWidth = screenshotBounds.width;
     int imageHeight = screenshotBounds.height;
 
+    /// XXX hack to draw a shadow.
     final int SHADOW_HEIGHT = 5;
     for (int h = 1; h < SHADOW_HEIGHT; h++) {
       g2d.setColor(new Color(43, 43, 43, 100 - h*20));
-      g2d.fillRect(screenshotBounds.x-h+1, screenshotBounds.y + min(screenshotBounds.height, imageHeight),
+      g2d.fillRect(screenshotBounds.x-h+1, screenshotBounds.y + min(screenshotBounds.height, imageHeight) + h,
                    min(screenshotBounds.width, imageWidth) + h - 1,
                    1);
       g2d.fillRect(screenshotBounds.x-h+1,
@@ -751,9 +856,6 @@ public class PreviewViewModel extends WidgetViewModel {
               matrix.perspectiveTransform(new Vector3(new double[]{rect.getMaxX(), rect.getMaxY(), 0})),
               matrix.perspectiveTransform(new Vector3(new double[]{rect.getMinX(), rect.getMaxY(), 0}))
             };
-            double xs = points[0].getX() - data.data.visibleRect.x;
-            double ys = points[0].getY() - data.data.visibleRect.y;
-            //System.out.println("XXX point = " + xs + ", " + ys );
 
             final Polygon polygon = new Polygon();
             for (Vector3 point : points) {

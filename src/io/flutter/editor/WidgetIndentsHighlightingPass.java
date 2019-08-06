@@ -261,11 +261,19 @@ public class WidgetIndentsHighlightingPass {
     for (WidgetViewModeInterface renderer : data.getRenderers()) {
       if (event.isConsumed()) {
         renderer.onMouseExited(event);
-      } else {
+      }
+      else {
         renderer.onMouseMoved(event);
       }
     }
+  }
+  public static void onFlutterFrame(EditorEx editor) {
+    final WidgetIndentsPassData data = getIndentsPassData(editor);
+    if (data == null || data.highlighters == null) return;
 
+    for (WidgetViewModeInterface renderer : data.getRenderers()) {
+      renderer.onFlutterFrame();
+    }
   }
 
   public static void onMousePressed(EditorEx editor, MouseEvent event) {

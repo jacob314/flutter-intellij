@@ -9,7 +9,9 @@ import com.intellij.openapi.editor.Caret;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.LogicalPosition;
 import com.intellij.openapi.editor.markup.RangeHighlighter;
+import com.intellij.openapi.ui.popup.Balloon;
 import com.intellij.openapi.ui.popup.JBPopup;
+import com.intellij.openapi.util.TextRange;
 import com.intellij.xdebugger.impl.XSourcePositionImpl;
 import org.jetbrains.annotations.NotNull;
 
@@ -19,7 +21,7 @@ import java.util.ArrayList;
 
 public class PreviewsForEditor implements WidgetViewModeInterface {
 
-  private JBPopup popup;
+  private Balloon popup;
 
   public PreviewsForEditor(WidgetViewModelDataBase data) {
     this.data= data;
@@ -143,7 +145,7 @@ public class PreviewsForEditor implements WidgetViewModeInterface {
       preview.onMousePressed(event);
       if (event.isConsumed()) break;
     }
-    if (!event.isConsumed() && event.isControlDown()) {
+    if (!event.isConsumed() && event.isShiftDown()) {
       event.consume();
       final LogicalPosition logicalPosition = data.editor.xyToLogicalPosition(event.getPoint());
       System.out.println("XXX logicalPosition = " + logicalPosition);
@@ -151,10 +153,14 @@ public class PreviewsForEditor implements WidgetViewModeInterface {
       XSourcePositionImpl position = XSourcePositionImpl.create(data.editor.getVirtualFile(), logicalPosition.line, logicalPosition.column);
       Point point = event.getLocationOnScreen();
 
-      popup = PropertyEditorPanel.showPopup(null, position, data.flutterDartAnalysisService, point);
+      if (popup != null) {
+        popup.dispose();;
+        popup = null;
+      }
+      popup = PropertyEditorPanel.showPopup(data.getApp(), data.editor, null, position, data.flutterDartAnalysisService, point);
     } else {
       if (popup != null) {
-        popup.cancel();
+        popup.dispose();
       }
     }
   }
@@ -184,13 +190,19 @@ public class PreviewsForEditor implements WidgetViewModeInterface {
     for (PreviewViewModel preview : getAllPreviews(false)) {
       preview.onMouseExited(event);
     }
-
   }
 
   @Override
   public void updateSelected(Caret carat) {
     for (PreviewViewModel preview : getAllPreviews(false)) {
       preview.updateSelected(carat);
+    }
+  }
+
+  @Override
+  public void onFlutterFrame() {
+    for (PreviewViewModel preview : getAllPreviews(true)) {
+      preview.onFlutterFrame();
     }
   }
 

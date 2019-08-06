@@ -42,6 +42,16 @@ import java.util.function.Supplier;
 public class InspectorService implements Disposable {
   private static int nextGroupId = 0;
 
+  public static class ScreenshotBoxesPair {
+    ScreenshotBoxesPair(Screenshot screenshot, ArrayList<DiagnosticsNode> boxes) {
+      this.screenshot = screenshot;
+      this.boxes = boxes;
+    }
+
+    public final Screenshot screenshot;
+    public final ArrayList<DiagnosticsNode> boxes;
+  }
+
   @NotNull private final FlutterApp app;
   @NotNull private final FlutterDebugProcess debugProcess;
   @NotNull private final VmService vmService;
@@ -187,13 +197,6 @@ public class InspectorService implements Disposable {
     inspectorLibrary.dispose();
     setPubRootDirectoriesSubscription.dispose();
   }
-
-  /*
-  public CompletableFuture<BufferedImage> getScreenshot(InspectorInstanceRef ref, int width, int height) {
-    return createObjectGroup("screenshots").getScreenshot(ref, width, height);
-  }
-
-   */
 
   public CompletableFuture<?> forceRefresh() {
     final List<CompletableFuture<?>> futures = new ArrayList<>();
@@ -408,6 +411,7 @@ public class InspectorService implements Disposable {
       this.groupName = debugName + "_" + nextGroupId;
       nextGroupId++;
     }
+    public InspectorService getInspectorService() { return InspectorService.this;}
 
     /**
      * Once an ObjectGroup has been disposed, all methods returning
@@ -631,6 +635,59 @@ public class InspectorService implements Disposable {
         }), null );
     }
 
+    // Warning: only certain properties are supported.
+    public CompletableFuture<Boolean> setProperty(DiagnosticsNode target, String property, String value) {
+      if (target == null || target.getValueRef() == null) return CompletableFuture.completedFuture(false);
+      final JsonObject params = new JsonObject();
+      params.addProperty("id", target.getValueRef().getId());
+      params.addProperty("property", property);
+      params.addProperty("value", value);
+      return nullIfDisposed(() -> {
+        return inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.setProperty", params).thenApplyAsync(
+          (JsonObject response) -> {
+            if (response == null || response.get("result").isJsonNull()) {
+              System.out.println("XXX invalid json");
+              return null;
+            }
+            final JsonPrimitive result = response.getAsJsonPrimitive("result");
+            return result.getAsBoolean();
+          });
+      });
+    }
+
+    public CompletableFuture<ScreenshotBoxesPair> getScreenshotWithSelection(DiagnosticsNode root, DiagnosticsNode target, int width, int height, double maxPixelRatio) {
+      final JsonObject params = new JsonObject();
+      params.addProperty("width", width);
+      params.addProperty("height", height);
+      params.addProperty("maxPixelRatio", maxPixelRatio);
+      params.addProperty("rootId", root.getValueRef().getId());
+      if (target != null && target.getValueRef() != null) {
+        params.addProperty("targetId", target.getValueRef().getId());
+      }
+      params.addProperty("groupName", groupName);
+      return nullIfDisposed(() -> {
+        return inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshoWithSelectiont", params).thenApplyAsync(
+          (JsonObject response) -> {
+            if (response == null || response.get("result").isJsonNull()) {
+              System.out.println("XXX invalid json");
+              return null;
+            }
+            final JsonObject result = response.getAsJsonObject("result");
+            Screenshot screenshot = null;
+            final JsonElement screenshotJson = result.get("screenshot");
+            if (screenshotJson != null && !screenshotJson.isJsonNull()) {
+              screenshot = getScreenshotFromJson(screenshotJson.getAsJsonObject());
+            }
+            ArrayList<DiagnosticsNode> boxes = null;
+            final JsonElement boxesJson = result.get("boxes");
+            if (boxesJson != null && !boxesJson.isJsonNull()) {
+              boxes = parseDiagnosticsNodesHelper(boxesJson.getAsJsonArray(), null);
+            }
+            return new ScreenshotBoxesPair(screenshot, boxes);
+          });
+      });
+    }
+
     public CompletableFuture<Screenshot> getScreenshot(InspectorInstanceRef ref, int width, int height, double maxPixelRatio) {
       final JsonObject params = new JsonObject();
       params.addProperty("width", width);
@@ -644,29 +701,35 @@ public class InspectorService implements Disposable {
           return null;
         }
         final JsonObject result = response.getAsJsonObject("result");
-        final String imageString = result.getAsJsonPrimitive("image").getAsString();
-        // create a buffered image
-        final byte[] imageBytes;
-        final BASE64Decoder decoder = new BASE64Decoder();
-        try {
-          imageBytes = decoder.decodeBuffer(imageString);
-        }
-        catch (IOException e) {
-          throw new RuntimeException("Error decoding base64 data: " + e.getMessage());
-        }
-        final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
-        BufferedImage image = null;
-        try {
-          image = ImageIO.read(byteArrayInputStream);
-          byteArrayInputStream.close();
-        }
-        catch (IOException e) {
-          throw new RuntimeException("Error decoding image: " + e.getMessage());
-        }
 
-        final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
-        return new Screenshot(image, transformedRect);
+        return getScreenshotFromJson(result);
       }));
+    }
+
+    @NotNull
+    private Screenshot getScreenshotFromJson(JsonObject result) {
+      final String imageString = result.getAsJsonPrimitive("image").getAsString();
+      // create a buffered image
+      final byte[] imageBytes;
+      final BASE64Decoder decoder = new BASE64Decoder();
+      try {
+        imageBytes = decoder.decodeBuffer(imageString);
+      }
+      catch (IOException e) {
+        throw new RuntimeException("Error decoding base64 data: " + e.getMessage());
+      }
+      final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
+      BufferedImage image = null;
+      try {
+        image = ImageIO.read(byteArrayInputStream);
+        byteArrayInputStream.close();
+      }
+      catch (IOException e) {
+        throw new RuntimeException("Error decoding image: " + e.getMessage());
+      }
+
+      final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
+      return new Screenshot(image, transformedRect);
     }
 
     public CompletableFuture<DiagnosticsNode> hoverAt(double x, double y) {

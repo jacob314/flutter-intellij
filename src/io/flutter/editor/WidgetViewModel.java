@@ -27,7 +27,7 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
   boolean visible = false;
   private InspectorObjectGroupManager groups;
-  private boolean isDisposed = false;
+  boolean isDisposed = false;
 
   InspectorObjectGroupManager getGroups() {
     final InspectorService service = getInspectorService();
@@ -80,6 +80,7 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
   @Override
   public void forceRender() {
+    if (!visible) return;
     data.editor.getComponent().repaint(); // XXX repaint rect?
     /*
     if (data.descriptor == null) {
@@ -129,6 +130,7 @@ public abstract class WidgetViewModel implements WidgetViewModeInterface {
 
   @Override
   public void onInspectorDataChange(boolean invalidateScreenshot) {
+
     final InspectorObjectGroupManager manager = getGroups();
     if (manager != null ){
       manager.cancelNext();;
