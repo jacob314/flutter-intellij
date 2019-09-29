@@ -18,14 +18,21 @@ import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.Segment;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
 import com.intellij.ui.Gray;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.paint.LinePainter2D;
 import com.intellij.util.DocumentUtil;
 import com.intellij.util.text.CharArrayUtil;
 import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
+import com.jetbrains.lang.dart.psi.DartCallExpression;
+import io.flutter.dart.FlutterDartAnalysisServer;
+import io.flutter.inspector.InspectorStateService;
 import io.flutter.settings.FlutterSettings;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
+import org.dartlang.analysis.server.protocol.FlutterOutlineAttribute;
 import org.jetbrains.annotations.NotNull;
 
 import java.awt.*;
@@ -245,7 +252,7 @@ public class WidgetIndentsHighlightingPass {
 
       int endLine = doc.getLineNumber(endOffset);
       if (childLines != null && childLines.size() > 0) {
-        final VisualPosition endPositionLastChild = editor.offsetToVisualPosition(childLines.get(childLines.size() - 1).getOffset());
+        final VisualPosition endPositionLastChild = editor.offsetToVisualPosition(childLines.get(childLines.size() - 1).getGuideOffset());
         if (endPositionLastChild.line == endPosition.line) {
           // The last child is on the same line as the end of the block.
           // This happens if code wasn't formatted with flutter style, for example:
@@ -326,7 +333,7 @@ public class WidgetIndentsHighlightingPass {
           if (childLine != null) {
             final int childIndent = childLine.getIndent();
             // Draw horizontal line to the child.
-            final VisualPosition widgetVisualPosition = editor.offsetToVisualPosition(childLine.getOffset());
+            final VisualPosition widgetVisualPosition = editor.offsetToVisualPosition(childLine.getGuideOffset());
             final Point widgetPoint = editor.visualPositionToXY(widgetVisualPosition);
             final int deltaX = widgetPoint.x - start.x;
             // We add a larger amount of panding at the end of the line if the indent is larger up until a max of 6 pixels which is the max
@@ -425,13 +432,30 @@ public class WidgetIndentsHighlightingPass {
   private final Project myProject;
   private final VirtualFile myFile;
   private final boolean convertOffsets;
+  private final PsiFile psiFile;
+  private final EditorMouseEventService editorEventService;
+  private final WidgetEditingContext context;
 
-  WidgetIndentsHighlightingPass(@NotNull Project project, @NotNull EditorEx editor, boolean convertOffsets) {
+  WidgetIndentsHighlightingPass(
+    @NotNull Project project,
+    @NotNull EditorEx editor,
+    boolean convertOffsets,
+    FlutterDartAnalysisServer flutterDartAnalysisService,
+    InspectorStateService inspectorStateService,
+    EditorMouseEventService editorEventService,
+    EditorPositionService editorPositionService
+  ) {
     this.myDocument = editor.getDocument();
     this.myEditor = editor;
     this.myProject = project;
     this.myFile = editor.getVirtualFile();
     this.convertOffsets = convertOffsets;
+    this.editorEventService = editorEventService;
+    context = new WidgetEditingContext(
+      myDocument, flutterDartAnalysisService, inspectorStateService, editorPositionService, myEditor);
+    psiFile = PsiDocumentManager.getInstance(myProject).getPsiFile(myDocument);
+    final WidgetIndentsPassData data = getIndentsPassData();
+    setIndentsPassData(editor, data);
   }
 
   private static void drawVerticalLineHelper(
@@ -491,6 +515,7 @@ public class WidgetIndentsHighlightingPass {
   }
 
   private static WidgetIndentsPassData getIndentsPassData(Editor editor) {
+    if (editor == null) return null;
     return editor.getUserData(INDENTS_PASS_DATA_KEY);
   }
 
@@ -515,8 +540,24 @@ public class WidgetIndentsHighlightingPass {
     setIndentsPassData(editor, null);
   }
 
-  public static void run(@NotNull Project project, @NotNull EditorEx editor, @NotNull FlutterOutline outline, boolean convertOffsets) {
-    final WidgetIndentsHighlightingPass widgetIndentsHighlightingPass = new WidgetIndentsHighlightingPass(project, editor, convertOffsets);
+  public static void run(@NotNull Project project,
+                         @NotNull EditorEx editor,
+                         @NotNull FlutterOutline outline,
+                         FlutterDartAnalysisServer flutterDartAnalysisService,
+                         InspectorStateService inspectorStateService,
+                         EditorMouseEventService editorEventService,
+                         EditorPositionService editorPositionService,
+                         boolean convertOffsets
+  ) {
+    final WidgetIndentsHighlightingPass widgetIndentsHighlightingPass = new WidgetIndentsHighlightingPass(
+      project,
+      editor,
+      convertOffsets,
+      flutterDartAnalysisService,
+      inspectorStateService,
+      editorEventService,
+      editorPositionService
+    );
     widgetIndentsHighlightingPass.setOutline(outline);
   }
 
@@ -548,6 +589,7 @@ public class WidgetIndentsHighlightingPass {
     doCollectInformationUpdateOutline(data);
     doApplyIndentInformationToEditor(data);
     setIndentsPassData(data);
+    updatePreviewHighlighter(myEditor.getMarkupModel(), data);
   }
 
   private void updateHitTester(WidgetIndentHitTester hitTester, WidgetIndentsPassData data) {
@@ -583,13 +625,14 @@ public class WidgetIndentsHighlightingPass {
         ProgressManager.checkCanceled();
         final TextRange range;
         if (descriptor.widget != null) {
-          range = descriptor.widget.getTextRange();
+          range = descriptor.widget.getFullRange();
         }
         else {
           final int endOffset =
             descriptor.endLine < myDocument.getLineCount() ? myDocument.getLineStartOffset(descriptor.endLine) : myDocument.getTextLength();
           range = new TextRange(myDocument.getLineStartOffset(descriptor.startLine), endOffset);
         }
+        descriptor.trackLocations(myDocument); // XXX we are tracking from multiple places.
         ranges.add(new TextRangeDescriptorPair(range, descriptor));
       }
       ranges.sort((a, b) -> Segment.BY_START_OFFSET_THEN_END_OFFSET.compare(a.range, b.range));
@@ -625,7 +668,7 @@ public class WidgetIndentsHighlightingPass {
 
         final int cmp = compare(entry, highlighter);
         if (cmp < 0) {
-          newHighlighters.add(createHighlighter(mm, entry));
+          newHighlighters.add(createHighlighter(mm, entry, data));
           curRange++;
         }
         else if (cmp > 0) {
@@ -646,11 +689,12 @@ public class WidgetIndentsHighlightingPass {
       }
     }
 
+
     final int startRangeIndex = curRange;
     assert myDocument != null;
     DocumentUtil.executeInBulk(myDocument, ranges.size() > 10000, () -> {
       for (int i = startRangeIndex; i < ranges.size(); i++) {
-        newHighlighters.add(createHighlighter(mm, ranges.get(i)));
+        newHighlighters.add(createHighlighter(mm, ranges.get(i), data));
       }
     });
 
@@ -702,6 +746,17 @@ public class WidgetIndentsHighlightingPass {
     return new OutlineLocation(node, line, column, indent, myFile, this);
   }
 
+  DartCallExpression getCallExpression(PsiElement element) {
+    if (element == null) {
+      return null;
+    }
+    if (element instanceof DartCallExpression) {
+      return (DartCallExpression)element;
+    }
+
+    return getCallExpression(element.getParent());
+  }
+
   private void buildWidgetDescriptors(
     final List<WidgetIndentGuideDescriptor> widgetDescriptors,
     FlutterOutline outlineNode,
@@ -710,32 +765,49 @@ public class WidgetIndentsHighlightingPass {
     if (outlineNode == null) return;
 
     final String kind = outlineNode.getKind();
-    final boolean widgetConstructor = "NEW_INSTANCE".equals(kind);
+    final boolean widgetConstructor = "NEW_INSTANCE".equals(kind) || (parent != null && ("VARIABLE".equals(kind)));
 
     final List<FlutterOutline> children = outlineNode.getChildren();
-    if (children == null || children.isEmpty()) return;
+    //    if (children == null || children.isEmpty()) return;
 
     if (widgetConstructor) {
       final OutlineLocation location = computeLocation(outlineNode);
-
       int minChildIndent = Integer.MAX_VALUE;
       final ArrayList<OutlineLocation> childrenLocations = new ArrayList<>();
       int endLine = location.getLine();
-      for (FlutterOutline child : children) {
-        final OutlineLocation childLocation = computeLocation(child);
-        if (childLocation.getLine() <= location.getLine()) {
-          // Skip children that don't actually occur on a later line. There is no
-          // way for us to draw good looking line art for them.
-          // TODO(jacobr): consider adding these children anyway so we can render
-          // them if there are edits and they are now properly formatted.
-          continue;
-        }
 
-        minChildIndent = min(minChildIndent, childLocation.getIndent());
-        endLine = max(endLine, childLocation.getLine());
-        childrenLocations.add(childLocation);
+      if (children != null) {
+        for (FlutterOutline child : children) {
+          final OutlineLocation childLocation = computeLocation(child);
+          if (childLocation.getLine() <= location.getLine()) {
+            // Skip children that don't actually occur on a later line. There is no
+            // way for us to draw good looking line art for them.
+            // TODO(jacobr): consider adding these children anyway so we can render
+            // them if there are edits and they are now properly formatted.
+            continue;
+          }
+
+          minChildIndent = min(minChildIndent, childLocation.getIndent());
+          endLine = max(endLine, childLocation.getLine());
+          childrenLocations.add(childLocation);
+        }
       }
-      if (!childrenLocations.isEmpty()) {
+      final Set<Integer> childrenOffsets = new HashSet<Integer>();
+      for (OutlineLocation childLocation : childrenLocations) {
+        childrenOffsets.add(childLocation.getGuideOffset());
+      }
+
+      final PsiElement element = psiFile.findElementAt(location.getGuideOffset());
+      final ArrayList<WidgetIndentGuideDescriptor.WidgetPropertyDescriptor> trustedAttributes = new ArrayList<>();
+      final List<FlutterOutlineAttribute> attributes = outlineNode.getAttributes();
+      if (attributes != null) {
+        for (FlutterOutlineAttribute attribute : attributes) {
+          trustedAttributes.add(new WidgetIndentGuideDescriptor.WidgetPropertyDescriptor(attribute));
+        }
+      }
+
+      // XXX if (!childrenLocations.isEmpty())
+      {
         // The indent is only used for sorting and disambiguating descriptors
         // as at render time we will pick the real indent for the outline based
         // on local edits that may have been made since the outline was computed.
@@ -746,21 +818,26 @@ public class WidgetIndentsHighlightingPass {
           location.getLine(),
           endLine + 1,
           childrenLocations,
-          location
+          location,
+          trustedAttributes,
+          outlineNode
         );
-        if (!descriptor.childLines.isEmpty()) {
+        // if (!descriptor.childLines.isEmpty())
+        {
           widgetDescriptors.add(descriptor);
           parent = descriptor;
         }
       }
     }
-    for (FlutterOutline child : children) {
-      buildWidgetDescriptors(widgetDescriptors, child, parent);
+    if (children != null) {
+      for (FlutterOutline child : children) {
+        buildWidgetDescriptors(widgetDescriptors, child, parent);
+      }
     }
   }
 
   @NotNull
-  private RangeHighlighter createHighlighter(MarkupModel mm, TextRangeDescriptorPair entry) {
+  private RangeHighlighter createHighlighter(MarkupModel mm, TextRangeDescriptorPair entry, WidgetIndentsPassData data) {
     final TextRange range = entry.range;
     final FlutterSettings settings = FlutterSettings.getInstance();
     if (range.getEndOffset() >= myDocument.getTextLength() && DEBUG_WIDGET_INDENTS) {
@@ -776,42 +853,24 @@ public class WidgetIndentsHighlightingPass {
     highlighter.setCustomRenderer(new WidgetCustomHighlighterRenderer(entry.descriptor, myDocument));
     return highlighter;
   }
-}
 
-/**
- * Data describing widget indents for an editor that is persisted across
- * multiple runs of the WidgetIndentsHighlightingPass.
- */
-class WidgetIndentsPassData {
-  /**
-   * Descriptors describing the data model to render the widget indents.
-   * <p>
-   * This data is computed from the FlutterOutline and contains additional
-   * information to manage how the locations need to be updated to reflect
-   * edits to the documents.
-   */
-  List<WidgetIndentGuideDescriptor> myDescriptors = Collections.emptyList();
-
-  /**
-   * Descriptors combined with their current locations in the possibly modified document.
-   */
-  List<TextRangeDescriptorPair> myRangesWidgets = Collections.emptyList();
-
-  /**
-   * Highlighters that perform the actual rendering of the widget indent
-   * guides.
-   */
-  List<RangeHighlighter> highlighters;
-
-  /**
-   * Source of truth for whether other UI overlaps with the widget indents.
-   */
-  WidgetIndentHitTester hitTester;
-
-  /**
-   * Outline the widget indents are based on.
-   */
-  FlutterOutline outline;
+  private void updatePreviewHighlighter(MarkupModel mm, WidgetIndentsPassData data) {
+    if (1 == 1) return; // XXX
+    if (data.previewsForEditor == null) {
+      final TextRange range = new TextRange(0, Integer.MAX_VALUE);
+      final RangeHighlighter highlighter =
+        mm.addRangeHighlighter(
+          0,
+          myDocument.getTextLength(),
+          HighlighterLayer.FIRST,
+          null,
+          HighlighterTargetArea.LINES_IN_RANGE
+        );
+      data.previewsForEditor = new PreviewsForEditor(context, editorEventService);
+      highlighter.setCustomRenderer(data.previewsForEditor);
+    }
+    data.previewsForEditor.outlinesChanged(data.myDescriptors);
+  }
 }
 
 class TextRangeDescriptorPair {
