@@ -14,6 +14,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * A utilities class for generating analysis server json requests.
@@ -45,7 +46,12 @@ public class FlutterRequestUtilities {
   public static JsonObject generateFlutterSetWidgetPropertyValue(String id, int propertyId, FlutterWidgetPropertyValue value) {
     final JsonObject params = new JsonObject();
     params.addProperty(ID, propertyId);
-    params.add(VALUE, value.toJson());
+    // Treat an empty expression and empty value objects as omitted values
+    // indicating the property should be removed.
+    final FlutterWidgetPropertyValue emptyValue = new FlutterWidgetPropertyValue(null, null, null, null, null, null);
+    if (!(value == null || Objects.equals(value.getExpression(), "") || value.equals(emptyValue))) {
+      params.add(VALUE, value.toJson());
+    }
     return buildJsonObjectRequest(id, METHOD_FLUTTER_SET_WIDGET_PROPERTY_VALUE, params);
   }
 
