@@ -1,0 +1,993 @@
+/*
+ * Copyright 2019 The Chromium Authors. All rights reserved.
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ */
+package io.flutter.editor;
+
+import com.google.common.base.Joiner;
+import com.intellij.icons.AllIcons;
+import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.ActionToolbar;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.CustomShortcutSet;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.Document;
+import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.ex.EditorEx;
+import com.intellij.openapi.fileEditor.FileDocumentManager;
+import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.ComboBox;
+import com.intellij.openapi.ui.SimpleToolWindowPanel;
+import com.intellij.openapi.ui.popup.*;
+import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.util.TextRange;
+import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.ui.ColorChooserService;
+import com.intellij.ui.ColorPickerListener;
+import com.intellij.ui.JBColor;
+import com.intellij.ui.awt.RelativePoint;
+import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBTextField;
+import com.intellij.ui.components.fields.ExtendableTextComponent;
+import com.intellij.ui.components.fields.ExtendableTextField;
+import com.intellij.util.ui.PositionTracker;
+import com.jetbrains.lang.dart.assists.AssistUtils;
+import com.jetbrains.lang.dart.assists.DartSourceEditException;
+import io.flutter.FlutterMessages;
+import io.flutter.dart.FlutterDartAnalysisServer;
+import io.flutter.hotui.StableWidgetTracker;
+import io.flutter.inspector.DiagnosticsNode;
+import io.flutter.inspector.InspectorObjectGroupManager;
+import io.flutter.inspector.InspectorService;
+import io.flutter.inspector.InspectorStateService;
+import io.flutter.preview.OutlineOffsetConverter;
+import io.flutter.preview.WidgetEditToolbar;
+import io.flutter.run.FlutterReloadManager;
+import io.flutter.run.daemon.FlutterApp;
+import io.flutter.utils.AsyncRateLimiter;
+import io.flutter.utils.AsyncUtils;
+import io.flutter.utils.ColorIconMaker;
+import io.flutter.utils.EventStream;
+import io.flutter.view.ColorPicker;
+import net.miginfocom.swing.MigLayout;
+import org.dartlang.analysis.server.protocol.*;
+import org.jetbrains.annotations.NonNls;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.List;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+
+class EnumValueWrapper {
+  final FlutterWidgetPropertyValueEnumItem item;
+  final String expression;
+
+  public EnumValueWrapper(FlutterWidgetPropertyValueEnumItem item) {
+    this.item = item;
+    this.expression = item.getName();
+    assert (this.expression != null);
+  }
+
+  public EnumValueWrapper(String expression) {
+    this.expression = expression;
+    item = null;
+  }
+
+  @Override
+  public String toString() {
+    if (expression != null) {
+      return expression;
+    }
+    return item != null ? item.getName() : "[null]";
+  }
+}
+
+class PropertyEnumComboBoxModel extends AbstractListModel<EnumValueWrapper>
+  implements ComboBoxModel<EnumValueWrapper> {
+  private final List<EnumValueWrapper> myList;
+  private EnumValueWrapper mySelected;
+  private String expression;
+
+  public PropertyEnumComboBoxModel(FlutterWidgetProperty property) {
+    final FlutterWidgetPropertyEditor editor = property.getEditor();
+    assert (editor != null);
+    myList = new ArrayList<>();
+    for (FlutterWidgetPropertyValueEnumItem item : editor.getEnumItems()) {
+      myList.add(new EnumValueWrapper(item));
+    }
+    String expression = property.getExpression();
+    if (expression == null) {
+      mySelected = null;
+      expression = "";
+      return;
+    }
+    if (property.getValue() != null) {
+      FlutterWidgetPropertyValue value = property.getValue();
+      FlutterWidgetPropertyValueEnumItem enumValue = value.getEnumValue();
+      if (enumValue != null) {
+        for (EnumValueWrapper e : myList) {
+          if (e != null && e.item != null && Objects.equals(e.item.getName(), enumValue.getName())) {
+            mySelected = e;
+          }
+        }
+      }
+    }
+    else {
+      final EnumValueWrapper newItem = new EnumValueWrapper(expression);
+      myList.add(newItem);
+      mySelected = newItem;
+    }
+    final String kind = editor.getKind();
+  }
+
+  @Override
+  public int getSize() {
+    return myList.size();
+  }
+
+  @Override
+  public EnumValueWrapper getElementAt(int index) {
+    return myList.get(index);
+  }
+
+  @Override
+  public EnumValueWrapper getSelectedItem() {
+    return mySelected;
+  }
+
+  @Override
+  public void setSelectedItem(Object item) {
+    if (item instanceof String) {
+      String expression = (String)item;
+      for (EnumValueWrapper e : myList) {
+        if (Objects.equals(e.expression, expression)) {
+          mySelected = e;
+          return;
+        }
+      }
+      EnumValueWrapper wrapper = new EnumValueWrapper(expression);
+      myList.add(wrapper);
+      this.fireIntervalAdded(this, myList.size() - 1, myList.size());
+      setSelectedItem(wrapper);
+      return;
+    }
+    setSelectedItem((EnumValueWrapper)item);
+  }
+
+  public void setSelectedItem(EnumValueWrapper item) {
+    mySelected = item;
+    fireContentsChanged(this, 0, getSize());
+  }
+}
+
+public class PropertyEditorPanel extends SimpleToolWindowPanel implements Disposable {
+  protected final AsyncRateLimiter retryLookupPropertiesRateLimiter;
+  /**
+   * Whether the property panel is being rendered in a fixed width context such
+   * as inside a baloon popup window or is within a resizeable window.
+   */
+  private final boolean fixedWidth;
+  private final InspectorStateService.Listener inspectorStateServiceListener;
+  private final InspectorStateService inspectorStateService;
+  private final FlutterDartAnalysisServer flutterDartAnalysisService;
+  private final Project project;
+  private final boolean showWidgetEditToolbar;
+  private final Map<String, JComponent> fields = new HashMap<>();
+  private final Map<String, FlutterWidgetProperty> propertyMap = new HashMap<>();
+  private final Map<String, String> currentExpressionMap = new HashMap<>();
+  InspectorObjectGroupManager groupManager;
+
+  // TODO(jacobr): figure out why this is needed.
+  int numFailures;
+
+  String previouslyFocusedProperty = null;
+  private DiagnosticsNode node;
+  private InspectorService inspectorService;
+  private JBPopup popup;
+  private final ArrayList<FlutterWidgetProperty> properties = new ArrayList<>();
+  /**
+   * Outline node
+   */
+  private FlutterOutline outline;
+
+  private EventStream<VirtualFile> activeFile;
+
+  /**
+   * Whether the property panel has already triggered a pending hot reload.
+   */
+
+  private boolean pendingHotReload;
+
+  /**
+   * Whether the property panel needs another hot reload to occur after the
+   * current pending hot reload is complete.
+   */
+  private boolean needHotReload;
+  private CompletableFuture<List<FlutterWidgetProperty>> propertyFuture;
+
+  public PropertyEditorPanel(@Nullable InspectorStateService inspectorStateService,
+                             Project project,
+                             FlutterDartAnalysisServer flutterDartAnalysisService,
+                             boolean showWidgetEditToolbar,
+                             boolean fixedWidth) {
+    super(true, true);
+    setFocusable(true);
+    this.fixedWidth = fixedWidth;
+
+    this.inspectorStateService = inspectorStateService;
+    inspectorStateServiceListener = new InspectorStateService.Listener() {
+
+      @Override
+      public void onInspectorAvailable(InspectorService service) {
+        // The app has terminated or restarted. No way we are still waiting
+        // for a pending hot reload.
+        pendingHotReload = false;
+        if (service == inspectorService) {
+          return;
+        }
+        inspectorService = service;
+        if (groupManager != null) {
+          groupManager.clear(true);
+          ;
+        }
+        groupManager = null;
+      }
+
+      @Override
+      public void notifyAppReloaded() {
+        System.out.println("XXX app reloaded!");
+        pendingHotReload = false;
+      }
+      @Override
+      public void notifyAppRestarted() {
+        pendingHotReload = false;
+      }
+    };
+
+    retryLookupPropertiesRateLimiter = new AsyncRateLimiter(10, () -> {
+      if (Disposer.isDisposed(PropertyEditorPanel.this) || numFailures == 0) {
+        return CompletableFuture.completedFuture(null);
+      }
+      maybeLoadProperties();
+      return CompletableFuture.completedFuture(null);
+    }, this);
+
+    inspectorStateService.addListener(inspectorStateServiceListener);
+    this.project = project;
+    this.flutterDartAnalysisService = flutterDartAnalysisService;
+    this.showWidgetEditToolbar = showWidgetEditToolbar;
+  }
+
+  public static Balloon showPopup(InspectorStateService inspectorStateService,
+                                  EditorEx editor,
+                                  DiagnosticsNode node,
+                                  @NotNull InspectorService.Location location,
+                                  FlutterDartAnalysisServer service,
+                                  Point point) {
+    final Balloon balloon = showPopupHelper(inspectorStateService, editor.getProject(), node, location, service);
+    if (point != null) {
+      balloon.show(new PropertyBalloonPositionTrackerScreenshot(editor, point), Balloon.Position.below);
+    }
+    else {
+      final int offset = location.getOffset();
+      final TextRange textRange = new TextRange(offset, offset + 1);
+      balloon.show(new PropertyBalloonPositionTracker(editor, textRange), Balloon.Position.below);
+    }
+    return balloon;
+  }
+
+  public static Balloon showPopup(InspectorStateService inspectorStateService,
+                                  Project project,
+                                  Component component,
+                                  @Nullable DiagnosticsNode node,
+                                  @NonNls InspectorService.Location location,
+                                  FlutterDartAnalysisServer service,
+                                  Point point) {
+    final Balloon balloon = showPopupHelper(inspectorStateService, project, node, location, service);
+    balloon.show(new RelativePoint(component, point), Balloon.Position.above);
+    return balloon;
+  }
+
+  public static Balloon showPopupHelper(InspectorStateService inspectorService,
+                                        Project project,
+                                        @Nullable DiagnosticsNode node,
+                                        @NotNull InspectorService.Location location,
+                                        FlutterDartAnalysisServer service) {
+    //   assert (node != null || position != null);
+    final Color GRAPHITE_COLOR = new JBColor(new Color(236, 236, 236, 215), new Color(60, 63, 65, 215));
+
+    final PropertyEditorPanel panel =
+      new PropertyEditorPanel(inspectorService, project, service, true, true);
+
+    final StableWidgetTracker tracker = new StableWidgetTracker(location, service, project, panel);
+
+    final EventStream<VirtualFile> activeFile = new EventStream<>(location.getFile());
+    panel.initalize(node, tracker.getCurrentOutlines(), activeFile);
+
+    panel.setBackground(GRAPHITE_COLOR);
+    panel.setOpaque(false);
+    final BalloonBuilder balloonBuilder = JBPopupFactory.getInstance().createBalloonBuilder(panel);
+    balloonBuilder.setFadeoutTime(0);
+    balloonBuilder.setFillColor(GRAPHITE_COLOR);
+    balloonBuilder.setAnimationCycle(0);
+    balloonBuilder.setHideOnClickOutside(true);
+    balloonBuilder.setHideOnKeyOutside(false);
+    balloonBuilder.setHideOnAction(false);
+    balloonBuilder.setCloseButtonEnabled(false);
+    balloonBuilder.setBlockClicksThroughBalloon(true);
+    balloonBuilder.setRequestFocus(true);
+    balloonBuilder.setShadow(true);
+    Balloon balloon = balloonBuilder.createBalloon();
+    Disposer.register(balloon, panel);
+
+    return balloon;
+  }
+
+  InspectorObjectGroupManager getGroupManager() {
+    if (groupManager != null || inspectorService == null) {
+      return groupManager;
+    }
+    groupManager = new InspectorObjectGroupManager(inspectorService, "property-editor");
+    return groupManager;
+  }
+
+  int getOffset() {
+    if (outline == null) return -1;
+    final VirtualFile file = activeFile.getValue();
+
+    assert (activeFile.getValue() != null);
+    final OutlineOffsetConverter converter = new OutlineOffsetConverter(project, activeFile.getValue());
+    return converter.getConvertedOutlineOffset(outline);
+  }
+
+  InspectorService.Location getInspectorLocation() {
+    final VirtualFile file = activeFile.getValue();
+    if (file == null || outline == null) {
+      return null;
+    }
+
+    final Document document = FileDocumentManager.getInstance().getDocument(file);
+    return InspectorService.Location.outlineToLocation(project, activeFile.getValue(), outline, document);
+  }
+
+  void updateWidgetDescription() {
+    final VirtualFile file = activeFile.getValue();
+    final int offset = getOffset();
+
+    if (file == null || offset < 0) {
+      properties.clear();
+      return;
+    }
+
+    final CompletableFuture<List<FlutterWidgetProperty>> future =
+      flutterDartAnalysisService.getWidgetDescription(file, offset);
+    propertyFuture = future;
+
+    AsyncUtils.whenCompleteUiThread(propertyFuture, (updatedProperties, throwable) -> {
+      if (propertyFuture != future) {
+        // This request is obsolete.
+        return;
+      }
+      if (offset != getOffset() || !file.equals(activeFile.getValue())) {
+        return;
+      }
+      properties.clear();
+      properties.addAll(updatedProperties);
+      propertyMap.clear();
+      currentExpressionMap.clear();
+      if (updatedProperties != null) {
+        for (FlutterWidgetProperty property : updatedProperties) {
+          final String name = property.getName();
+          propertyMap.put(name, property);
+          currentExpressionMap.put(name, property.getExpression());
+        }
+      }
+
+      if (propertyMap.isEmpty()) {
+        // TODO(jacobr): it is unclear why this initialy returns an invalid value.
+        numFailures++;
+        if (numFailures < 3) {
+          retryLookupPropertiesRateLimiter.scheduleRequest();
+        }
+        return;
+      }
+      numFailures = 0;
+      rebuildUi();
+    });
+  }
+
+  public void outlinesChanged(List<FlutterOutline> outlines) {
+    final FlutterOutline nextOutline = outlines.isEmpty() ? null : outlines.get(0);
+    if (nextOutline == outline) return;
+    this.outline = nextOutline;
+    maybeLoadProperties();
+    lookupMatchingElements();
+  }
+
+  public void lookupMatchingElements() {
+    final InspectorObjectGroupManager groupManager = getGroupManager();
+    if (groupManager == null || outline == null) return;
+    groupManager.cancelNext();
+    ;
+    node = null;
+    final InspectorService.ObjectGroup group = groupManager.getNext();
+    final InspectorService.Location location = getInspectorLocation();
+    group.safeWhenComplete(group.getElementsAtLocation(location, 10), (elements, error) -> {
+      if (elements == null || error != null) {
+        return;
+      }
+      node = elements.isEmpty() ? null : elements.get(0);
+      groupManager.promoteNext();
+      ;
+      updateUiToReflectNode();
+    });
+  }
+
+  private void updateUiToReflectNode() {
+    // TODO(jacobr): get to work here.
+  }
+
+  void maybeLoadProperties() {
+    updateWidgetDescription();
+  }
+
+  public void initalize(
+    DiagnosticsNode node,
+    EventStream<List<FlutterOutline>> currentOutlines,
+    EventStream<VirtualFile> activeFile
+  ) {
+    this.node = node;
+    this.activeFile = activeFile;
+    currentOutlines.listen(this::outlinesChanged, true);
+    if (showWidgetEditToolbar) {
+      final WidgetEditToolbar widgetEditToolbar =
+        new WidgetEditToolbar(true, currentOutlines, activeFile, project, flutterDartAnalysisService);
+      final ActionToolbar toolbar = widgetEditToolbar.getToolbar();
+      toolbar.setShowSeparatorTitles(true);
+      setToolbar(toolbar.getComponent());
+    }
+
+    rebuildUi();
+  }
+
+  @SuppressWarnings("UseJBColor")
+  protected void rebuildUi() {
+    // TODO(jacobr): be lazier about only rebuilding what changed.
+    Component focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+    if (focusOwner != null) {
+      if (isAncestorOf(focusOwner)) {
+        for (Map.Entry<String, JComponent> entry : fields.entrySet()) {
+          if (entry.getValue().isAncestorOf(focusOwner) || entry.getValue() == focusOwner) {
+            previouslyFocusedProperty = entry.getKey();
+            break;
+          }
+        }
+      }
+      else {
+        previouslyFocusedProperty = null;
+      }
+    }
+    removeAll();
+    // Layout Constraints
+    // Column constraints
+    MigLayout manager = new MigLayout(
+      "insets 3", // Layout Constraints
+      fixedWidth ? "[::120]5[:20:400]" : "[::120]5[grow]", // Column constraints
+      "[23]4[23]"
+    );
+    setLayout(manager);
+    int added = 0;
+    for (FlutterWidgetProperty property : properties) {
+      String name = property.getName();
+      if (name.startsWith("on") || name.endsWith("Callback")) {
+        continue;
+      }
+      if (name.equals("key")) {
+        continue;
+      }
+      if (name.equals("child") || name.equals("children")) {
+        continue;
+      }
+      if (name.equals("Container")) {
+        List<FlutterWidgetProperty> containerProperties = property.getChildren();
+        // TODO(jacobr): add support for container properties.
+        continue;
+      }
+      // Text widget properties to demote.
+      if (name.equals("strutStyle") || name.equals("locale") || name.equals("semanticsLabel")) {
+        continue;
+      }
+      final String documentation = property.getDocumentation();
+      JComponent field = null;
+
+      if (property.getEditor() == null) {
+        boolean colorProperty = name.equals("color");
+        final String colorPropertyName = name;
+        if (colorProperty) {
+          final ExtendableTextField colorField = new ExtendableTextField("", 1);
+          final String expression = property.getExpression();
+          if (expression != null) {
+            colorField.setText(expression);
+          }
+          field = colorField;
+          final Color[] customColor = new Color[]{parseColorExpression(expression)};
+          final ColorIconMaker maker = new ColorIconMaker();
+
+          Runnable colorFieldAction = () -> {
+            final ColorChooserService service = ColorChooserService.getInstance();
+
+            List<ColorPickerListener> listeners = new ArrayList<>();
+            listeners.add(new ColorPickerListener() {
+              @Override
+              public void colorChanged(Color color) {
+                long value =
+                  ((long)color.getAlpha() << 24) | ((long)color.getRed() << 16) | (long)(color.getGreen() << 8) | (long)color.getBlue();
+                customColor[0] = color;
+                final InspectorObjectGroupManager manager = getGroupManager();
+                final String textV = buildColorExpression(color);
+
+                colorField.setText(textV);
+                colorField.repaint();
+                if (node != null && manager != null) {
+                  // TODO(jacobr): async rate limit this request?
+                  final String expectedTextValue = textV;
+                  final InspectorService.ObjectGroup group = manager.getCurrent();
+                  if (!pendingHotReload) {
+                    CompletableFuture<Boolean> valueFuture = manager.getCurrent().setProperty(node, "color", "" + value);
+                    group.safeWhenComplete(valueFuture, (success, error) -> {
+                      if (success == null || error != null) {
+                        return;
+                      }
+                      // If setting the property immediately failed, we may have to set the property value fully to see a result.
+                      if (!success && expectedTextValue.equals(colorField.getText())) {
+                        setPropertyValue(colorPropertyName, textV);
+                      }
+                    });
+                  }
+                }
+              }
+
+              @Override
+              public void closed(@Nullable Color color) {
+                // TODO(jacobr): this code doesn't seem to ever be called.
+                final String expression = buildColorExpression(color);
+                colorField.setText(expression);
+                setPropertyValue(colorPropertyName, expression);
+              }
+            });
+            final Disposable colorPickerDisposer = new Disposable() {
+
+              @Override
+              public void dispose() {
+                final Color color = customColor[0];
+                if (color != null) {
+                  final String expression = buildColorExpression(color);
+                  colorField.setText(expression);
+                  setPropertyValue(colorPropertyName, expression);
+                }
+              }
+            };
+            Color initialColor = customColor[0];
+            if (initialColor == null) {
+              initialColor = Color.GRAY;
+            }
+            // TODO(jacobr): use the color from the diagnostics properties if available.
+            final ColorPicker picker = new ColorPicker(colorPickerDisposer, initialColor, true, true, listeners, false);
+            ComponentPopupBuilder builder = JBPopupFactory.getInstance().createComponentPopupBuilder(picker, PropertyEditorPanel.this);
+            builder.setMovable(true);
+            builder.setFocusable(true);
+            builder.setTitle("Select color");
+
+            popup = builder.createPopup();
+            popup.showInCenterOf(colorField);
+            Disposer.register(popup, colorPickerDisposer);
+          };
+          final KeyStroke keyStroke = KeyStroke.getKeyStroke(10, 64);
+          final String tooltip = "Edit color";
+          ExtendableTextComponent.Extension setColorExtension =
+            new ExtendableTextComponent.Extension() {
+              @Override
+              public boolean isIconBeforeText() {
+                return true;
+              }
+
+              public Icon getIcon(boolean hovered) {
+                final Color color = customColor[0];
+                if (color == null) {
+                  return AllIcons.Actions.Colors;
+                }
+                return maker.getCustomIcon(color);
+              }
+
+              public String getTooltip() {
+                return tooltip;
+              }
+
+              public Runnable getActionOnClick() {
+                return colorFieldAction;
+              }
+            };
+          (new DumbAwareAction() {
+            public void actionPerformed(@NotNull AnActionEvent e) {
+              colorFieldAction.run();
+            }
+          }).registerCustomShortcutSet(new CustomShortcutSet(keyStroke), colorField, this);
+          colorField.addExtension(setColorExtension);
+          addTextFieldListeners(name, colorField);
+        }
+        else {
+          String expression = property.getExpression();
+          /*if (expression == null || expression.isEmpty()) {
+            continue;
+          }*/
+          if (expression == null) {
+            expression = "";
+          }
+          final JBTextField textField = new JBTextField(expression);
+          addTextFieldListeners(name, textField);
+          field = textField;
+        }
+      }
+      else {
+        FlutterWidgetPropertyEditor editor = property.getEditor();
+        if (editor.getEnumItems() != null) {
+          final ComboBox comboBox = new ComboBox();
+          comboBox.setEditable(true);
+          final PropertyEnumComboBoxModel model = new PropertyEnumComboBoxModel(property);
+          comboBox.setModel(model);
+
+          // TODO(jacobr): need a bit more padding around comboBox to make it match the JBTextField.
+          field = comboBox;
+          comboBox.addActionListener(new ActionListener() {
+                                       @Override
+                                       public void actionPerformed(ActionEvent e) {
+                                         System.out.println("XXX actionEvent:" + e);
+                                       }
+                                     }
+          );
+          comboBox.addItemListener(e -> {
+            if (e.getStateChange() == ItemEvent.SELECTED) {
+              EnumValueWrapper wrapper = (EnumValueWrapper)e.getItem();
+              if (wrapper.item != null) {
+                setParsedPropertyValue(name, new FlutterWidgetPropertyValue(null, null, null, null, wrapper.item, null));
+              }
+              else {
+                setPropertyValue(name, wrapper.expression);
+              }
+            }
+          });
+        }
+        else {
+          // TODO(jacobr): use IntegerField and friends when appropriate.
+          // TODO(jacobr): we should probably use if (property.isSafeToUpdate())
+          // but that currently it seems to have a bunch of false positives.
+          final String kind = property.getEditor().getKind();
+          if (Objects.equals(kind, FlutterWidgetPropertyEditorKind.BOOL)) {
+            // TODO(jacobr): show as boolean.
+          }
+          final JBTextField textField = new JBTextField(property.getExpression());
+          field = textField;
+          addTextFieldListeners(name, textField);
+        }
+      }
+
+      if (name.equals("data")) {
+        if (documentation != null) {
+          field.setToolTipText(documentation);
+          //            field.getEmptyText().setText(documentation);
+        }
+        else {
+          field.setToolTipText("data");
+        }
+        add(field, "span, growx");
+      }
+      else {
+        JBLabel label = new JBLabel(property.getName());
+        add(label, "right");
+        if (documentation != null) {
+          label.setToolTipText(documentation);
+        }
+        add(field, "wrap, growx");
+      }
+      if (documentation != null) {
+        field.setToolTipText(documentation);
+      }
+      // Hack: set the preferred width of the ui elements to a small value
+      // so it doesn't cause the overall layout to be wider than it should
+      // be.
+      if (!fixedWidth) {
+        setPreferredFieldSize(field);
+      }
+
+      fields.put(name, field);
+      added++;
+    }
+    if (previouslyFocusedProperty != null && fields.containsKey(previouslyFocusedProperty)) {
+      fields.get(previouslyFocusedProperty).requestFocus();
+    }
+
+    if (added == 0) {
+      add(new JBLabel("No editable properties"));
+    }
+    // TODO(jacobr): why is this needed?
+    revalidate();
+    repaint();
+  }
+
+  private void addTextFieldListeners(String name, JBTextField field) {
+    field.addActionListener(e -> setPropertyValue(name, field.getText()));
+    field.addFocusListener(new FocusListener() {
+      @Override
+      public void focusGained(FocusEvent e) {
+      }
+
+      @Override
+      public void focusLost(FocusEvent e) {
+        setPropertyValue(name, field.getText());
+      }
+    });
+  }
+
+  private static String buildColorExpression(Color color) {
+    final String flutterColorName = FlutterColors.getColorName(color);
+    if (flutterColorName != null) {
+      // TODO(jacobr): only apply this conversion if the material library is
+      // already imported in the library being edited.
+      // We also need to be able to handle cases where the material library
+      // is imported with a prefix.
+      return "Colors." + flutterColorName;
+    }
+    final int alpha = color.getAlpha();
+    final int red = color.getRed();
+    final int green = color.getGreen();
+    final int blue = color.getBlue();
+    return String.format("Color(0x%02x%02x%02x%02x)", alpha, red, green, blue);
+  }
+
+  private static Color parseColorExpression(String expression) {
+    if (expression == null) return null;
+
+    final String colorsPrefix = "Colors.";
+    if (expression.startsWith(colorsPrefix)) {
+      final FlutterColors.FlutterColor flutterColor = FlutterColors.getColor(expression.substring(colorsPrefix.length()));
+      if (flutterColor != null) {
+        return flutterColor.getAWTColor();
+      }
+    }
+    return ExpressionParsingUtils.parseColor(expression);
+  }
+
+  private void setPreferredFieldSize(JComponent field) {
+    field.setPreferredSize(new Dimension(20, (int)field.getPreferredSize().getHeight()));
+  }
+
+  public String getDescription() {
+    final List<String> parts = new ArrayList<>();
+    if (outline != null && outline.getClassName() != null) {
+      parts.add(outline.getClassName());
+    }
+    parts.add("Properties");
+    return Joiner.on(" ").join(parts);
+  }
+
+   private void setPropertyValue(String propertyName, String expression) {
+     setParsedPropertyValue(propertyName,  new FlutterWidgetPropertyValue(null, null, null, null, null, expression));
+   }
+
+   private void setParsedPropertyValue(String propertyName, FlutterWidgetPropertyValue value) {
+    // TODO(jacobr): also do simple tracking of how the previous expression maps to the current expression to avoid spurious edits.
+
+    // Treat an empty expression and empty value objects as omitted values
+    // indicating the property should be removed.
+    final FlutterWidgetPropertyValue emptyValue = new FlutterWidgetPropertyValue(null, null, null, null, null, null);
+
+    final FlutterWidgetProperty property = propertyMap.get(propertyName);
+    if (property == null) {
+      // UI is in the process of updating. Skip this action.
+      return;
+    }
+
+    if (property.getExpression() != null && property.getExpression().equals(value.getExpression())) {
+      return;
+    }
+
+    if (value != null && Objects.equals(value.getExpression(), "") || emptyValue.equals(value)) {
+      // Normalize empty expressions to simplify calling this api.
+      value = null;
+    }
+
+    final String lastExpression = currentExpressionMap.get(propertyName);
+    if (lastExpression != null && value != null && lastExpression.equals(value.getExpression())) {
+      return;
+    }
+    currentExpressionMap.put(propertyName, value != null ? value.getExpression() : null);
+
+    final FlutterWidgetPropertyEditor editor = property.getEditor();
+    if (editor != null && value != null && value.getExpression() != null) {
+      final String expression = value.getExpression();
+      // Normalize expressions as primitive values.
+      final String kind = editor.getKind();
+      switch (kind) {
+        case FlutterWidgetPropertyEditorKind.BOOL: {
+          if (expression.equals("true")) {
+            value = new FlutterWidgetPropertyValue(true, null, null, null, null, null);
+          }
+          else if (expression.equals("false")) {
+            value = new FlutterWidgetPropertyValue(false, null, null, null, null, null);
+          }
+        }
+        break;
+        case FlutterWidgetPropertyEditorKind.STRING: {
+          // TODO(jacobr): there might be non-string literal cases that match this patterned.
+          if (expression.length() >= 2 && (
+            (expression.startsWith("'") && expression.endsWith("'")) ||
+            (expression.startsWith("\"") && expression.endsWith("\"")))) {
+            value = new FlutterWidgetPropertyValue(null, null, null, expression.substring(1, expression.length() - 1), null, null);
+          }
+        }
+        break;
+        case FlutterWidgetPropertyEditorKind.DOUBLE: {
+          try {
+            double doubleValue = Double.parseDouble(expression);
+            if (((double)((int)doubleValue)) == doubleValue) {
+              // Express doubles that can be expressed as ints as ints.
+              value = new FlutterWidgetPropertyValue(null, null, (int)doubleValue, null, null, null);
+            }
+            else {
+              value = new FlutterWidgetPropertyValue(null, doubleValue, null, null, null, null);
+            }
+          }
+          catch (NumberFormatException e) {
+            // Don't convert value.
+          }
+        }
+        break;
+        case FlutterWidgetPropertyEditorKind.INT: {
+          try {
+            int intValue = Integer.parseInt(expression);
+            value = new FlutterWidgetPropertyValue(null, null, intValue, null, null, null);
+          }
+          catch (NumberFormatException e) {
+            // Don't convert value.
+          }
+        }
+        break;
+      }
+    }
+    if (Objects.equals(property.getValue(), value)) {
+      // Short circuit as nothing changed.
+      return;
+    }
+
+
+    final SourceChange change;
+    try {
+      change = flutterDartAnalysisService.setWidgetPropertyValue(property.getId(), value);
+    }
+    catch (Exception e) {
+      if (value != null && value.getExpression() != null) {
+        FlutterMessages.showInfo("Invalid property value", value.getExpression());
+      }
+      else {
+        FlutterMessages.showError("Unable to set propery value", e.getMessage());
+      }
+      return;
+    }
+
+    if (change != null && change.getEdits() != null && !change.getEdits().isEmpty()) {
+      ApplicationManager.getApplication().runWriteAction(() -> {
+        try {
+          System.out.println("XXX applying source change: " + change);
+          AssistUtils.applySourceChange(project, change, false);
+          if (inspectorService != null) {
+            // XXX handle the app loading part way through better.
+            ArrayList<FlutterApp> l = new ArrayList<>();
+            l.add(inspectorService.getApp());
+            if (pendingHotReload) {
+              // It is important we don't try to trigger multiple hot reloads
+              // as that will result in annoying user errors.
+              needHotReload = true;
+              System.out.println("XXX skipping hot reload");
+          //    FileDocumentManager.getInstance().saveAllDocuments();
+            }
+            else {
+              System.out.println("XXX about to trigger hot reload");
+              pendingHotReload = true;
+              needHotReload = false;
+              FlutterReloadManager.getInstance(project).saveAllAndReloadAll(l, "Property Editor");
+            }
+          }
+        }
+        catch (DartSourceEditException exception) {
+          FlutterMessages.showInfo("Failed to apply code change", exception.getMessage());
+        }
+      });
+    }
+  }
+
+  @Override
+  public void dispose() {
+    if (groupManager != null) {
+      groupManager.clear(false);
+      groupManager = null;
+    }
+
+    inspectorStateService.removeListener(inspectorStateServiceListener);
+  }
+}
+
+class PropertyBalloonPositionTracker extends PositionTracker<Balloon> {
+  private final Editor myEditor;
+  private final TextRange myRange;
+
+  PropertyBalloonPositionTracker(Editor editor, TextRange range) {
+    super(editor.getContentComponent());
+    myEditor = editor;
+    myRange = range;
+  }
+
+  static boolean insideVisibleArea(Editor e, TextRange r) {
+    int textLength = e.getDocument().getTextLength();
+    if (r.getStartOffset() > textLength) return false;
+    if (r.getEndOffset() > textLength) return false;
+    Rectangle visibleArea = e.getScrollingModel().getVisibleArea();
+    Point point = e.logicalPositionToXY(e.offsetToLogicalPosition(r.getStartOffset()));
+
+    return visibleArea.contains(point);
+  }
+
+  @Override
+  public RelativePoint recalculateLocation(final Balloon balloon) {
+    int startOffset = myRange.getStartOffset();
+    int endOffset = myRange.getEndOffset();
+
+    //This might be interesting or might be an unrelated use case.
+    /*
+    if (!insideVisibleArea(myEditor, myRange)) {
+      if (!balloon.isDisposed()) {
+        Disposer.dispose(balloon);
+      }
+
+      VisibleAreaListener visibleAreaListener = new VisibleAreaListener() {
+        @Override
+        public void visibleAreaChanged(@NotNull VisibleAreaEvent e) {
+          if (insideVisibleArea(myEditor, myRange)) {
+//            showBalloon(myProject, myEditor, myRange);
+            final VisibleAreaListener visibleAreaListener = this;
+            myEditor.getScrollingModel().removeVisibleAreaListener(visibleAreaListener);
+          }
+        }
+      };
+      myEditor.getScrollingModel().addVisibleAreaListener(visibleAreaListener);
+    }
+*/
+    Point startPoint = myEditor.visualPositionToXY(myEditor.offsetToVisualPosition(startOffset));
+    Point endPoint = myEditor.visualPositionToXY(myEditor.offsetToVisualPosition(endOffset));
+    Point point = new Point((startPoint.x + endPoint.x) / 2, startPoint.y + myEditor.getLineHeight());
+
+    return new RelativePoint(myEditor.getContentComponent(), point);
+  }
+}
+
+class PropertyBalloonPositionTrackerScreenshot extends PositionTracker<Balloon> {
+  private final Editor myEditor;
+  private final Point point;
+
+  PropertyBalloonPositionTrackerScreenshot(Editor editor, Point point) {
+    super(editor.getComponent());
+    myEditor = editor;
+    this.point = point;
+  }
+
+  @Override
+  public RelativePoint recalculateLocation(final Balloon balloon) {
+    return new RelativePoint(myEditor.getComponent(), point);
+  }
+}
+

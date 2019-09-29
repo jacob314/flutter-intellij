@@ -9,6 +9,7 @@ import com.google.common.collect.Lists;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.components.ServiceManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 import io.flutter.dart.FlutterOutlineListener;
 import io.flutter.run.FlutterAppManager;
 import io.flutter.run.daemon.FlutterApp;
@@ -146,11 +147,19 @@ public class InspectorStateService implements Disposable {
 
       @Override
       public void notifyAppReloaded() {
+        invokeOnAllListeners((listener) -> {
+          listener.notifyAppReloaded();
+        });
+
         requestRepaint(true);
       }
 
       @Override
       public void notifyAppRestarted() {
+        invokeOnAllListeners((listener) -> {
+          listener.notifyAppRestarted();
+        });
+
         requestRepaint(true);
       }
 
@@ -245,25 +254,29 @@ public class InspectorStateService implements Disposable {
     /**
      * Whether the listener is still valid.
      */
-    boolean isValid();
+    // XXX remove
+    default boolean isValid() { return true; }
     /**
      * Called when the inspector selection has changed.
      */
-    void onSelectionChanged(DiagnosticsNode selection);
-
+    default void onSelectionChanged(DiagnosticsNode selection) { }
 
     void onInspectorAvailable(InspectorService service);
 
-      /**
-       * Called when something has changed and UI should be repainted.
-       *
-       * @param force indicates that the old UI is likely completely obsolete.
-       */
-     void requestRepaint(boolean force);
+    /**
+     * Called when something has changed and UI should be repainted.
+     *
+     * @param force indicates that the old UI is likely completely obsolete.
+     */
+     default void requestRepaint(boolean force) { }
 
     /**
      * Called whenever Flutter renders a frame.
      */
-    void onFlutterFrame();
+    default void onFlutterFrame() {}
+
+    default void notifyAppReloaded() { }
+
+    default void notifyAppRestarted() { }
   }
 }
