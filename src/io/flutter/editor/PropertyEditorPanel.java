@@ -7,14 +7,17 @@ package io.flutter.editor;
 
 import com.google.common.base.Joiner;
 import com.intellij.openapi.Disposable;
+import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
+import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.openapi.ui.popup.*;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.TextRange;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.ColorChooserService;
 import com.intellij.ui.ColorPickerListener;
 import com.intellij.ui.JBColor;
@@ -30,9 +33,12 @@ import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.hotui.StableWidgetTracker;
 import io.flutter.inspector.DiagnosticsNode;
 import io.flutter.inspector.InspectorService;
+import io.flutter.preview.PreviewView;
+import io.flutter.preview.WidgetEditToolbar;
 import io.flutter.run.FlutterReloadManager;
 import io.flutter.run.daemon.FlutterApp;
 import io.flutter.utils.ColorIconMaker;
+import io.flutter.utils.EventStream;
 import io.flutter.view.ColorPicker;
 import net.miginfocom.swing.MigLayout;
 import org.dartlang.analysis.server.protocol.*;
@@ -148,13 +154,14 @@ class PropertyEnumComboBoxModel extends AbstractListModel<EnumValueWrapper>
   }
 }
 
-public class PropertyEditorPanel extends JBPanel implements Disposable {
+public class PropertyEditorPanel extends SimpleToolWindowPanel implements Disposable {
   final DiagnosticsNode node;
   private final InspectorService.Location position;
   private final FlutterDartAnalysisServer flutterDartAnalysisService;
   private final Project project;
   private final InspectorService inspectorService;
   private final JBLabel descriptionLabel;
+  private final WidgetEditToolbar widgetEditToolbar;
   private JBPopup popup;
 
   private java.util.List<FlutterWidgetProperty> properties;
@@ -196,18 +203,24 @@ public class PropertyEditorPanel extends JBPanel implements Disposable {
                              DiagnosticsNode node,
                              InspectorService.Location location,
                              FlutterDartAnalysisServer flutterDartAnalysisService) {
-    super();
-    tracker = new StableWidgetTracker(location, flutterDartAnalysisService, inspectorService, project, this::outlineChanged, this);
+    super(true, true);
     this.inspectorService = inspectorService;
     this.project = project;
     this.node = node;
     this.position = location;
     this.flutterDartAnalysisService = flutterDartAnalysisService;
     descriptionLabel = new JBLabel();
+    tracker = new StableWidgetTracker(location, flutterDartAnalysisService, inspectorService, project, this);
+    tracker.getCurrentOutline().listen(this::outlineChanged, true);
+
+    EventStream<VirtualFile> activeFile = new EventStream<>();
+    activeFile.setValue(location.getFile());
+    widgetEditToolbar = new WidgetEditToolbar(tracker.getCurrentOutline(), activeFile, project, flutterDartAnalysisService);
+
 
     lookupWidgetDescription();
 
-    MigLayout manager = new MigLayout("insets 0", // Layout Constraints
+    final MigLayout manager = new MigLayout("insets 0", // Layout Constraints
                                       "[::120]5[:150:400]", // Column constraints
                                       "[]0[]");
     setLayout(manager);
@@ -215,7 +228,7 @@ public class PropertyEditorPanel extends JBPanel implements Disposable {
     add(descriptionLabel, "span, growx");
     int added = 0;
     if (node != null) {
-      InspectorService.ObjectGroup group = node.getInspectorService().getNow(null);
+      final InspectorService.ObjectGroup group = node.getInspectorService().getNow(null);
 
       group.safeWhenComplete(node.getProperties(group), (diagnosticProperties, error) -> {
         if (error != null || diagnosticProperties == null) {
@@ -418,6 +431,10 @@ public class PropertyEditorPanel extends JBPanel implements Disposable {
     if (added == 0) {
       add(new JBLabel("No editable properties"));
     }
+
+    ActionToolbar toolbar = widgetEditToolbar.getToolbar();
+    toolbar.setShowSeparatorTitles(true);
+    setToolbar(toolbar.getComponent());
   }
 
 
@@ -457,7 +474,7 @@ public class PropertyEditorPanel extends JBPanel implements Disposable {
                                         @NotNull InspectorService.Location location,
                                         FlutterDartAnalysisServer service) {
  //   assert (node != null || position != null);
-    final Color GRAPHITE_COLOR = new JBColor(new Color(200, 200, 200, 215), new Color(100, 100, 100, 215));
+    final Color GRAPHITE_COLOR = new JBColor(new Color(236, 236, 236, 215), new Color(60, 63, 65, 215));
 
     final PropertyEditorPanel panel =
       new PropertyEditorPanel(inspectorService, project, node, location, service);

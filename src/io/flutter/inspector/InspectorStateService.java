@@ -54,6 +54,10 @@ public class InspectorStateService implements Disposable {
     return ServiceManager.getService(project, InspectorStateService.class);
   }
 
+  public InspectorService getInspectorService() {
+    return inspectorService;
+  }
+
   public InspectorStateService(Project project) {
     this.project = project;
     // XXX probably does not need to be on the ui thread.

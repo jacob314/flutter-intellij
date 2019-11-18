@@ -14,6 +14,7 @@ import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
 import io.flutter.inspector.InspectorService;
+import io.flutter.utils.EventStream;
 import org.dartlang.analysis.server.protocol.FlutterOutline;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -32,7 +33,6 @@ public class StableWidgetTracker implements Disposable {
   private final InspectorService.Location initialLocation;
   private final FlutterDartAnalysisServer flutterAnalysisServer;
   private final DartAnalysisServerService analysisServerService;
-  final Listener listener;
 
   // Path to the current outline
   private ArrayList<FlutterOutline> lastPath;
@@ -58,7 +58,7 @@ public class StableWidgetTracker implements Disposable {
     } else {
       lastPath = findSimilarPath(root, lastPath);
     }
-    listener.outlineChanged(lastPath.isEmpty() ? null : lastPath.get(lastPath.size() - 1));
+    currentOutline.setValue(lastPath.isEmpty() ? null : lastPath.get(lastPath.size() - 1));
   }
 
   private static int findChildIndex(FlutterOutline node, FlutterOutline child) {
@@ -86,6 +86,7 @@ public class StableWidgetTracker implements Disposable {
     return path;
   }
 
+  // XXX duped.
   private boolean findOutlineAtOffset(FlutterOutline outline, int offset, ArrayList<FlutterOutline> path) {
     if (outline == null) {
       return false;
@@ -106,34 +107,36 @@ public class StableWidgetTracker implements Disposable {
     return false;
   }
 
+  // XXX duped
   private int getConvertedFileOffset(int offset) {
     return analysisServerService.getConvertedOffset(initialLocation.getFile(), offset);
   }
-
+// XXX duped
   public int getConvertedOutlineOffset(FlutterOutline outline) {
     final int offset = outline.getOffset();
     return getConvertedFileOffset(offset);
   }
-
+// XXX DUPED
   private int getConvertedOutlineEnd(FlutterOutline outline) {
     final int end = outline.getOffset() + outline.getLength();
     return getConvertedFileOffset(end);
   }
 
+  private final EventStream<FlutterOutline> currentOutline;
+
+  public EventStream<FlutterOutline> getCurrentOutline() { return currentOutline; }
 
   public StableWidgetTracker(
     InspectorService.Location initialLocation,
     FlutterDartAnalysisServer flutterAnalysisServer,
     InspectorService inspectorService,
     Project project,
-    Listener listener,
     Disposable parentDisposable
   ) {
     Disposer.register(parentDisposable, this);
-
+    currentOutline = new EventStream<>();
     this.flutterAnalysisServer = flutterAnalysisServer;
     this.initialLocation = initialLocation;
-    this.listener = listener;
     analysisServerService = DartAnalysisServerService.getInstance(project);
     currentFilePath = FileUtil.toSystemDependentName(initialLocation.getFile().getPath());
     flutterAnalysisServer.addOutlineListener(currentFilePath, outlineListener);
@@ -144,7 +147,4 @@ public class StableWidgetTracker implements Disposable {
     flutterAnalysisServer.removeOutlineListener(currentFilePath, outlineListener);
   }
 
-  public interface Listener {
-    void outlineChanged(FlutterOutline outline);
-  }
 }

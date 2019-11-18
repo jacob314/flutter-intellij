@@ -43,12 +43,7 @@ import com.intellij.ui.content.ContentManager;
 import com.intellij.ui.speedSearch.SpeedSearchUtil;
 import com.intellij.ui.treeStructure.Tree;
 import com.intellij.util.messages.MessageBusConnection;
-import com.jetbrains.lang.dart.analyzer.DartAnalysisServerService;
-import com.jetbrains.lang.dart.assists.AssistUtils;
-import com.jetbrains.lang.dart.assists.DartSourceEditException;
-import icons.FlutterIcons;
 import io.flutter.FlutterInitializer;
-import io.flutter.FlutterMessages;
 import io.flutter.FlutterUtils;
 import io.flutter.dart.FlutterDartAnalysisServer;
 import io.flutter.dart.FlutterOutlineListener;
@@ -59,6 +54,7 @@ import io.flutter.inspector.InspectorService;
 import io.flutter.inspector.InspectorStateService;
 import io.flutter.settings.FlutterSettings;
 import io.flutter.utils.CustomIconMaker;
+import io.flutter.utils.EventStream;
 import net.miginfocom.swing.MigLayout;
 import org.dartlang.analysis.server.protocol.*;
 import org.jetbrains.annotations.NotNull;
@@ -67,10 +63,7 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.*;
 import javax.swing.event.TreeSelectionEvent;
 import javax.swing.event.TreeSelectionListener;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeModel;
-import javax.swing.tree.TreeNode;
-import javax.swing.tree.TreePath;
+import javax.swing.tree.*;
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
@@ -80,7 +73,6 @@ import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.util.List;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 
 @com.intellij.openapi.components.State(
   name = "FlutterPreviewView",
@@ -98,24 +90,10 @@ public class PreviewView implements PersistentStateComponent<PreviewViewState>, 
   @NotNull
   private final FlutterDartAnalysisServer flutterAnalysisServer;
 
-  final QuickAssistAction actionCenter;
-  final QuickAssistAction actionPadding;
-  final QuickAssistAction actionColumn;
-  final QuickAssistAction actionRow;
-  final QuickAssistAction actionContainer;
-  final QuickAssistAction actionMoveUp;
-  final QuickAssistAction actionMoveDown;
-  final QuickAssistAction actionRemove;
-  final ExtractMethodAction actionExtractMethod;
-  final ExtractWidgetAction actionExtractWidget;
   private final InspectorStateService inspectorStateService;
   private final InspectorStateService.Listener inspectorStateServiceListener;
 
   private SimpleToolWindowPanel windowPanel;
-  private ActionToolbar windowToolbar;
-
-  private final Map<String, AnAction> messageToActionMap = new HashMap<>();
-  private final Map<AnAction, SourceChange> actionToChangeMap = new HashMap<>();
 
   private boolean isSettingSplitterProportion = false;
   private Splitter splitter;
@@ -126,12 +104,14 @@ public class PreviewView implements PersistentStateComponent<PreviewViewState>, 
   private final Set<FlutterOutline> outlinesWithWidgets = Sets.newHashSet();
   private final Map<FlutterOutline, DefaultMutableTreeNode> outlineToNodeMap = Maps.newHashMap();
 
-  private VirtualFile currentFile;
+  private final EventStream<VirtualFile> currentFile;
   private String currentFilePath;
   FileEditor currentFileEditor;
   private Editor currentEditor;
   private FlutterOutline currentOutline;
+  private final EventStream<FlutterOutline> activeOutline;
 
+  private final WidgetEditToolbar widgetEditToolbar;
   private final FlutterOutlineListener outlineListener = new FlutterOutlineListener() {
     @Override
     public void outlineUpdated(@NotNull String filePath, @NotNull FlutterOutline outline, @Nullable String instrumentedCode) {
@@ -201,7 +181,8 @@ XXX MERGY
 
   public PreviewView(@NotNull Project project) {
     this.project = project;
-
+    currentFile = new EventStream<>();
+    activeOutline = new EventStream<>();
     flutterAnalysisServer = FlutterDartAnalysisServer.getInstance(project);
 
     inspectorStateService = InspectorStateService.getInstance(project);
@@ -254,17 +235,7 @@ XXX MERGY
       }
     });
 
-
-    actionCenter = new QuickAssistAction("dart.assist.flutter.wrap.center", FlutterIcons.Center, "Wrap with Center");
-    actionPadding = new QuickAssistAction("dart.assist.flutter.wrap.padding", FlutterIcons.Padding, "Wrap with Padding");
-    actionColumn = new QuickAssistAction("dart.assist.flutter.wrap.column", FlutterIcons.Column, "Wrap with Column");
-    actionRow = new QuickAssistAction("dart.assist.flutter.wrap.row", FlutterIcons.Row, "Wrap with Row");
-    actionContainer = new QuickAssistAction("dart.assist.flutter.wrap.container", FlutterIcons.Container, "Wrap with Container");
-    actionMoveUp = new QuickAssistAction("dart.assist.flutter.move.up", FlutterIcons.Up, "Move widget up");
-    actionMoveDown = new QuickAssistAction("dart.assist.flutter.move.down", FlutterIcons.Down, "Move widget down");
-    actionRemove = new QuickAssistAction("dart.assist.flutter.removeWidget", FlutterIcons.RemoveWidget, "Remove this widget");
-    actionExtractMethod = new ExtractMethodAction();
-    actionExtractWidget = new ExtractWidgetAction();
+    widgetEditToolbar = new WidgetEditToolbar(activeOutline, currentFile, project, flutterAnalysisServer);
   }
 
   @Override
@@ -287,28 +258,13 @@ XXX MERGY
     final ContentFactory contentFactory = ContentFactory.SERVICE.getInstance();
     final ContentManager contentManager = toolWindow.getContentManager();
 
-    final DefaultActionGroup toolbarGroup = new DefaultActionGroup();
-    toolbarGroup.add(actionCenter);
-    toolbarGroup.add(actionPadding);
-    toolbarGroup.add(actionColumn);
-    toolbarGroup.add(actionRow);
-    toolbarGroup.add(actionContainer);
-    toolbarGroup.addSeparator();
-    toolbarGroup.add(actionExtractMethod);
-    toolbarGroup.addSeparator();
-    toolbarGroup.add(actionMoveUp);
-    toolbarGroup.add(actionMoveDown);
-    toolbarGroup.addSeparator();
-    toolbarGroup.add(actionRemove);
-
     final Content content = contentFactory.createContent(null, null, false);
     content.setCloseable(false);
 
     windowPanel = new OutlineComponent(this);
     content.setComponent(windowPanel);
 
-    windowToolbar = ActionManager.getInstance().createActionToolbar("PreviewViewToolbar", toolbarGroup, true);
-    windowPanel.setToolbar(windowToolbar.getComponent());
+    windowPanel.setToolbar(widgetEditToolbar.getToolbar().getComponent());
 
     final DefaultMutableTreeNode rootNode = new DefaultMutableTreeNode();
 
@@ -372,17 +328,15 @@ XXX MERGY
     previewArea = new PreviewArea(project, outlinesWithWidgets, new PreviewArea.Listener() {
       @Override
       public void clicked(FlutterOutline outline) {
-        final ImmutableList<FlutterOutline> outlines = ImmutableList.of(outline);
-        updateActionsForOutlines(outlines);
-        applyOutlinesSelectionToTree(outlines);
+        activeOutline.setValue(outline);
+        applyOutlinesSelectionToTree(outline);
         jumpToOutlineInEditor(outline, false);
       }
 
       @Override
       public void doubleClicked(FlutterOutline outline) {
-        final ImmutableList<FlutterOutline> outlines = ImmutableList.of(outline);
-        updateActionsForOutlines(outlines);
-        applyOutlinesSelectionToTree(outlines);
+        activeOutline.setValue(outline);
+        applyOutlinesSelectionToTree(outline);
         jumpToOutlineInEditor(outline, true);
       }
 
@@ -452,11 +406,10 @@ XXX MERGY
         if (e.getKeyChar() == '\n') {
           if (currentEditor == null) return;
           e.consume();
-          DiagnosticsNode node = null; // XXX lookup node(s) at location?
           final InspectorService.Location location = InspectorService.Location.outlineToLocation(currentEditor, outline);
           if (location == null) return;
           Balloon popup = PropertyEditorPanel
-            .showPopup(inspectorService, project, tree.getParent(), node, location, flutterAnalysisServer,
+            .showPopup(inspectorService, project, tree.getParent(), null, location, flutterAnalysisServer,
                        popupLocation);
         }
       }
@@ -478,69 +431,18 @@ XXX MERGY
             return;
           }
         }
+        final InspectorService.Location location = InspectorService.Location.outlineToLocation(currentEditor, selectedOutlines.get(0));
+        Balloon popup = PropertyEditorPanel
+          .showPopup(inspectorService, project, tree, null, location, flutterAnalysisServer,
+                     new Point(x, y));
 
-        // The corresponding tree item has just been selected.
-        // Wait short time for receiving assists from the server.
-        for (int i = 0; i < 20 && actionToChangeMap.isEmpty(); i++) {
-          Uninterruptibles.sleepUninterruptibly(5, TimeUnit.MILLISECONDS);
-        }
-
-        final DefaultActionGroup group = new DefaultActionGroup();
-        boolean hasAction = false;
-        if (actionCenter.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionCenter));
-        }
-        if (actionPadding.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionPadding));
-        }
-        if (actionColumn.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionColumn));
-        }
-        if (actionRow.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionRow));
-        }
-        if (actionContainer.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionContainer));
-        }
-        group.addSeparator();
-        if (actionExtractMethod.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionExtractMethod));
-        }
-        if (actionExtractWidget.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionExtractWidget));
-        }
-        group.addSeparator();
-        if (actionMoveUp.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionMoveUp));
-        }
-        if (actionMoveDown.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionMoveDown));
-        }
-        group.addSeparator();
-        if (actionRemove.isEnabled()) {
-          hasAction = true;
-          group.add(new TextOnlyActionWrapper(actionRemove));
-        }
-
-        // Don't show the empty popup.
-        if (!hasAction) {
-          return;
-        }
-
-        final ActionManager actionManager = ActionManager.getInstance();
-        final ActionPopupMenu popupMenu = actionManager.createActionPopupMenu(ActionPlaces.UNKNOWN, group);
-        popupMenu.getComponent().show(comp, x, y);
+        // XXX show popup!
       }
     });
+  }
+
+  private OutlineOffsetConverter getOutlineOffsetConverter() {
+    return new OutlineOffsetConverter(project, currentFile.getValue());
   }
 
   private void handleTreeSelectionEvent(TreeSelectionEvent e) {
@@ -550,7 +452,7 @@ XXX MERGY
     }
 
     final List<FlutterOutline> selectedOutlines = getOutlinesSelectedInTree();
-    updateActionsForOutlines(selectedOutlines);
+    activeOutline.setValue(selectedOutlines.isEmpty() ? null : selectedOutlines.get(0));
   }
 
   private void selectPath(TreePath selectionPath, boolean focusEditor) {
@@ -563,14 +465,14 @@ XXX MERGY
       return;
     }
     final int offset = outline.getDartElement() != null ? outline.getDartElement().getLocation().getOffset() : outline.getOffset();
-    final int editorOffset = getConvertedFileOffset(offset);
+    final int editorOffset = getOutlineOffsetConverter().getConvertedFileOffset(offset);
 
     sendAnalyticEvent("jumpToSource");
 
     if (currentFile != null) {
       currentEditor.getCaretModel().removeCaretListener(caretListener);
       try {
-        new OpenFileDescriptor(project, currentFile, editorOffset).navigate(focusEditor);
+        new OpenFileDescriptor(project, currentFile.getValue(), editorOffset).navigate(focusEditor);
       }
       finally {
         currentEditor.getCaretModel().addCaretListener(caretListener);
@@ -578,44 +480,6 @@ XXX MERGY
     }
 
     previewArea.select(ImmutableList.of(outline), currentEditor);
-  }
-
-  private void updateActionsForOutlines(List<FlutterOutline> outlines) {
-    synchronized (actionToChangeMap) {
-      actionToChangeMap.clear();
-    }
-
-    final VirtualFile selectionFile = this.currentFile;
-    if (selectionFile != null && !outlines.isEmpty()) {
-      ApplicationManager.getApplication().executeOnPooledThread(() -> {
-        final FlutterOutline firstOutline = outlines.get(0);
-        final FlutterOutline lastOutline = outlines.get(outlines.size() - 1);
-        final int offset = getConvertedOutlineOffset(firstOutline);
-        final int length = getConvertedOutlineEnd(lastOutline) - offset;
-        final List<SourceChange> changes = flutterAnalysisServer.edit_getAssists(selectionFile, offset, length);
-
-        // If the current file or outline are different, ignore the changes.
-        // We will eventually get new changes.
-        final List<FlutterOutline> newOutlines = getOutlinesSelectedInTree();
-        if (!Objects.equals(this.currentFile, selectionFile) || !outlines.equals(newOutlines)) {
-          return;
-        }
-
-        // Associate changes with actions.
-        // Actions will be enabled / disabled in background.
-        for (SourceChange change : changes) {
-          final AnAction action = messageToActionMap.get(change.getMessage());
-          if (action != null) {
-            actionToChangeMap.put(action, change);
-          }
-        }
-
-        // Update actions immediately.
-        if (windowToolbar != null) {
-          ApplicationManager.getApplication().invokeLater(() -> windowToolbar.updateActionsImmediately());
-        }
-      });
-    }
   }
 
   // TODO: Add parent relationship info to FlutterOutline instead of this O(n^2) traversal.
@@ -736,45 +600,13 @@ XXX MERGY
     return getOutlineOfNode(node);
   }
 
-  private int getConvertedFileOffset(int offset) {
-    return DartAnalysisServerService.getInstance(project).getConvertedOffset(currentFile, offset);
-  }
-
-  private int getConvertedOutlineOffset(FlutterOutline outline) {
-    final int offset = outline.getOffset();
-    return getConvertedFileOffset(offset);
-  }
-
-  private int getConvertedOutlineEnd(FlutterOutline outline) {
-    final int end = outline.getOffset() + outline.getLength();
-    return getConvertedFileOffset(end);
-  }
-
-  private FlutterOutline findOutlineAtOffset(FlutterOutline outline, int offset) {
-    if (outline == null) {
-      return null;
-    }
-    if (getConvertedOutlineOffset(outline) <= offset && offset <= getConvertedOutlineEnd(outline)) {
-      if (outline.getChildren() != null) {
-        for (FlutterOutline child : outline.getChildren()) {
-          final FlutterOutline foundChild = findOutlineAtOffset(child, offset);
-          if (foundChild != null) {
-            return foundChild;
-          }
-        }
-      }
-      return outline;
-    }
-    return null;
-  }
-
   private void addOutlinesCoveredByRange(List<FlutterOutline> covered, int start, int end, @Nullable FlutterOutline outline) {
     if (outline == null) {
       return;
     }
-
-    final int outlineStart = getConvertedOutlineOffset(outline);
-    final int outlineEnd = getConvertedOutlineEnd(outline);
+    final OutlineOffsetConverter converter = getOutlineOffsetConverter();
+    final int outlineStart = converter.getConvertedOutlineOffset(outline);
+    final int outlineEnd = converter.getConvertedOutlineEnd(outline);
     // The outline ends before, or starts after the selection.
     if (outlineEnd < start || outlineStart > end) {
       return;
@@ -795,9 +627,9 @@ XXX MERGY
   }
 
   private void setSelectedFile(VirtualFile newFile) {
-    if (currentFile != null) {
+    if (currentFile.getValue() != null) {
       flutterAnalysisServer.removeOutlineListener(currentFilePath, outlineListener);
-      currentFile = null;
+      currentFile.setValue(null);
       currentFilePath = null;
     }
 
@@ -809,7 +641,7 @@ XXX MERGY
     // Show the toolbar if the new file is a Dart file, or hide otherwise.
     if (windowPanel != null) {
       if (newFile != null) {
-        windowPanel.setToolbar(windowToolbar.getComponent());
+        windowPanel.setToolbar(widgetEditToolbar.getToolbar().getComponent());
       }
       else if (windowPanel.isToolbarVisible()) {
         windowPanel.setToolbar(null);
@@ -825,8 +657,8 @@ XXX MERGY
 
     // Subscribe for the outline for the new file.
     if (newFile != null) {
-      currentFile = newFile;
-      currentFilePath = FileUtil.toSystemDependentName(currentFile.getPath());
+      currentFile.setValue(newFile);
+      currentFilePath = FileUtil.toSystemDependentName(newFile.getPath());
       flutterAnalysisServer.addOutlineListener(currentFilePath, outlineListener);
     }
   }
@@ -850,14 +682,16 @@ XXX MERGY
 
     // If no covered outlines, try to find the outline under the caret.
     if (selectedOutlines.isEmpty()) {
-      final FlutterOutline outline = findOutlineAtOffset(currentOutline, caret.getOffset());
+      final FlutterOutline outline = getOutlineOffsetConverter().findOutlineAtOffset(currentOutline, caret.getOffset());
       if (outline != null) {
         selectedOutlines.add(outline);
       }
     }
 
-    updateActionsForOutlines(selectedOutlines);
-    applyOutlinesSelectionToTree(selectedOutlines);
+    final FlutterOutline outline = selectedOutlines.isEmpty() ? null : selectedOutlines.get(0);
+    activeOutline.setValue(outline);
+
+    applyOutlinesSelectionToTree(outline);
 
     {
       final int offset = caret.getOffset();
@@ -865,11 +699,11 @@ XXX MERGY
     }
   }
 
-  private void applyOutlinesSelectionToTree(List<FlutterOutline> outlines) {
+  private void applyOutlinesSelectionToTree(FlutterOutline outline) {
     final List<TreePath> selectedPaths = new ArrayList<>();
     TreeNode[] lastNodePath = null;
     TreePath lastTreePath = null;
-    for (FlutterOutline outline : outlines) {
+    if (outline != null) {
       final DefaultMutableTreeNode selectedNode = outlineToNodeMap.get(outline);
       if (selectedNode != null) {
         lastNodePath = selectedNode.getPath();
@@ -952,149 +786,12 @@ XXX MERGY
     minimizePreviewArea();
   }
 
-  private void applyChangeAndShowException(SourceChange change) {
-    ApplicationManager.getApplication().runWriteAction(() -> {
-      try {
-        AssistUtils.applySourceChange(project, change, false);
-      }
-      catch (DartSourceEditException exception) {
-        FlutterMessages.showError("Error applying change", exception.getMessage());
-      }
-    });
-  }
-
   private void sendAnalyticEvent(@NotNull String name) {
     FlutterInitializer.getAnalytics().sendEvent("preview", name);
   }
 
-  private class QuickAssistAction extends AnAction {
-    private final String id;
 
-    QuickAssistAction(@NotNull String id, Icon icon, String assistMessage) {
-      super(assistMessage, null, icon);
-      this.id = id;
-      messageToActionMap.put(assistMessage, this);
-    }
 
-    @Override
-    public void actionPerformed(@NotNull AnActionEvent e) {
-      sendAnalyticEvent(id);
-      final SourceChange change;
-      synchronized (actionToChangeMap) {
-        change = actionToChangeMap.get(this);
-        actionToChangeMap.clear();
-      }
-      if (change != null) {
-        applyChangeAndShowException(change);
-      }
-    }
-
-    @Override
-    public void update(AnActionEvent e) {
-      final boolean hasChange = actionToChangeMap.containsKey(this);
-      e.getPresentation().setEnabled(hasChange);
-    }
-
-    boolean isEnabled() {
-      return actionToChangeMap.containsKey(this);
-    }
-  }
-
-  private class ExtractMethodAction extends AnAction {
-    private final String id = "dart.assist.flutter.extractMethod";
-
-    ExtractMethodAction() {
-      super("Extract Method...", null, FlutterIcons.ExtractMethod);
-    }
-
-    @Override
-    public void actionPerformed(@NotNull AnActionEvent e) {
-      final AnAction action = ActionManager.getInstance().getAction("ExtractMethod");
-      if (action != null) {
-        final FlutterOutline outline = getWidgetOutline();
-        if (outline != null) {
-          TransactionGuard.submitTransaction(project, () -> {
-            // Ideally we don't need this - just caret at the beginning should be enough.
-            // Unfortunately this was implemented only recently.
-            // So, we have to select the widget range.
-            final int offset = getConvertedOutlineOffset(outline);
-            final int end = getConvertedOutlineEnd(outline);
-            currentEditor.getSelectionModel().setSelection(offset, end);
-
-            final JComponent editorComponent = currentEditor.getComponent();
-            final DataContext editorContext = DataManager.getInstance().getDataContext(editorComponent);
-            final AnActionEvent editorEvent = AnActionEvent.createFromDataContext(ActionPlaces.UNKNOWN, null, editorContext);
-
-            action.actionPerformed(editorEvent);
-          });
-        }
-      }
-    }
-
-    @Override
-    public void update(AnActionEvent e) {
-      final boolean isEnabled = isEnabled();
-      e.getPresentation().setEnabled(isEnabled);
-    }
-
-    boolean isEnabled() {
-      return getWidgetOutline() != null;
-    }
-
-    private FlutterOutline getWidgetOutline() {
-      final List<FlutterOutline> outlines = getOutlinesSelectedInTree();
-      if (outlines.size() == 1) {
-        final FlutterOutline outline = outlines.get(0);
-        if (outline.getDartElement() == null) {
-          return outline;
-        }
-      }
-      return null;
-    }
-  }
-
-  private class ExtractWidgetAction extends AnAction {
-    private final String id = "dart.assist.flutter.extractwidget";
-
-    ExtractWidgetAction() {
-      super("Extract Widget...");
-    }
-
-    @Override
-    public void actionPerformed(@NotNull AnActionEvent e) {
-      final AnAction action = ActionManager.getInstance().getAction("Flutter.ExtractWidget");
-      if (action != null) {
-        TransactionGuard.submitTransaction(project, () -> {
-          final JComponent editorComponent = currentEditor.getComponent();
-          final DataContext editorContext = DataManager.getInstance().getDataContext(editorComponent);
-          final AnActionEvent editorEvent = AnActionEvent.createFromDataContext(ActionPlaces.UNKNOWN, null, editorContext);
-
-          action.actionPerformed(editorEvent);
-        });
-      }
-    }
-
-    @Override
-    public void update(AnActionEvent e) {
-      final boolean isEnabled = isEnabled();
-      e.getPresentation().setEnabled(isEnabled);
-    }
-
-    boolean isEnabled() {
-      return getWidgetOutline() != null;
-    }
-
-    private FlutterOutline getWidgetOutline() {
-      final List<FlutterOutline> outlines = getOutlinesSelectedInTree();
-      if (outlines.size() == 1) {
-        final FlutterOutline outline = outlines.get(0);
-        if (outline.getDartElement() == null) {
-          return outline;
-        }
-      }
-      return null;
-    }
-  }
 
   private class ShowOnlyWidgetsAction extends AnAction implements Toggleable, RightAlignedToolbarAction {
     ShowOnlyWidgetsAction() {
@@ -1145,6 +842,7 @@ class OutlineTree extends Tree {
     super(model);
 
     setRootVisible(false);
+    getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
     setToggleClickCount(0);
   }
 
