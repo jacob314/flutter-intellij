@@ -32,7 +32,7 @@ public class AsyncRateLimiter {
   /**
    * A request has been scheduled to run but is not yet pending.
    */
-  private boolean requestScheduledButNotStarted;
+  private volatile boolean requestScheduledButNotStarted;
 
   public AsyncRateLimiter(double framesPerSecond, Computable<CompletableFuture<?>> callback, Disposable parentDisposable) {
     this.callback = callback;
@@ -40,54 +40,66 @@ public class AsyncRateLimiter {
     requestScheduler = new Alarm(Alarm.ThreadToUse.POOLED_THREAD, parentDisposable);
   }
 
+  public final String requestScheduleLock = "requestScheduleLock";
+
   public void scheduleRequest() {
-    if (requestScheduledButNotStarted) {
-      // No need to schedule a request if one has already been scheduled but hasn't yet actually
-      // started executing.
-      return;
-    }
+    System.out.println("XXX schedule request: " + this.hashCode());
+    synchronized (requestScheduleLock) {
+      if (requestScheduledButNotStarted) {
+        // No need to schedule a request if one has already been scheduled but hasn't yet actually
+        // started executing.
+        return;
+      }
 
-    // Don't schedule the request if this rate limiter has been disposed.
-    if (requestScheduler.isDisposed()) {
-      return;
-    }
+      // Don't schedule the request if this rate limiter has been disposed.
+      if (requestScheduler.isDisposed()) {
+        return;
+      }
 
-    if (pendingRequest != null && !pendingRequest.isDone()) {
-      // Wait for the pending request to be done before scheduling the new request. The existing
-      // request has already started so may return state that is now out of date.
-      requestScheduledButNotStarted = true;
-      whenCompleteUiThread(pendingRequest, (Object ignored, Throwable error) -> {
-        pendingRequest = null;
-        requestScheduledButNotStarted = false;
-        scheduleRequest();
-      });
-      return;
-    }
+      if (pendingRequest != null && !pendingRequest.isDone()) {
+        // Wait for the pending request to be done before scheduling the new request. The existing
+        // request has already started so may return state that is now out of date.
+        requestScheduledButNotStarted = true;
+        whenCompleteUiThread(pendingRequest, (Object ignored, Throwable error) -> {
+          synchronized (requestScheduleLock) {
+            pendingRequest = null;
+            requestScheduledButNotStarted = false;
+          }
+          scheduleRequest();
+        });
+        return;
+      }
 
-    if (rateLimiter.tryAcquire()) {
-      // Safe to perform the request immediately.
-      performRequest();
-    }
-    else {
-      // Track that we have scheduled a request and then schedule the request to occur once the
-      // rate limiter is available.
-      requestScheduledButNotStarted = true;
-      requestScheduler.addRequest(() -> {
-        rateLimiter.acquire();
+      if (rateLimiter.tryAcquire()) {
+        // Safe to perform the request immediately.
+        performRequest();
+      }
+      else {
+        // Track that we have scheduled a request and then schedule the request to occur once the
+        // rate limiter is available.
+        requestScheduledButNotStarted = true;
+        requestScheduler.addRequest(() -> {
+          rateLimiter.acquire();
 
-        final Runnable doRun = () -> {
-          requestScheduledButNotStarted = false;
-          performRequest();
-        };
-        final Application app = ApplicationManager.getApplication();
-        if (app == null || app.isUnitTestMode()) {
-          // This case existing to support unittesting.
-          SwingUtilities.invokeLater(doRun);
-        }
-        else {
-          app.invokeLater(doRun);
-        }
-      }, 0);
+          final Runnable doRun = () -> {
+            synchronized (requestScheduleLock) {
+              if (requestScheduledButNotStarted == false) {
+                return;
+              }
+              requestScheduledButNotStarted = false;
+            }
+            performRequest();
+          };
+          final Application app = ApplicationManager.getApplication();
+          if (app == null || app.isUnitTestMode()) {
+            // This case existing to support unittesting.
+            SwingUtilities.invokeLater(doRun);
+          }
+          else {
+            app.invokeLater(doRun);
+          }
+        }, 0);
+      }
     }
   }
 

@@ -815,6 +815,7 @@ public class InspectorService implements Disposable {
     }
 
     public CompletableFuture<InteractiveScreenshot> getScreenshotAtLocation(Location location, int count, int width, int height, double maxPixelRatio) {
+      System.out.println("XXX fetch screenshot for: " + location);
       final JsonObject params = new JsonObject();
       addLocationToParams(location, params);
       params.addProperty("count", count);
