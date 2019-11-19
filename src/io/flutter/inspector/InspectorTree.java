@@ -111,6 +111,7 @@ public class InspectorTree extends Tree implements DataProvider {
 
   void registerShortcuts(Disposable parentDisposable) {
     DebuggerUIUtil.registerActionOnComponent(InspectorActions.JUMP_TO_TYPE_SOURCE, this, parentDisposable);
+    DebuggerUIUtil.registerActionOnComponent(InspectorActions.JUMP_TO_SOURCE, this, parentDisposable);
   }
 
   @Nullable
