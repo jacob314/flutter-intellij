@@ -312,10 +312,9 @@ public class PreviewView implements PersistentStateComponent<PreviewViewState>, 
         }
       }
     });
+    scrollPane.setMinimumSize(new Dimension(1, 1));
     splitter.setFirstComponent(scrollPane);
     windowPanel.setContent(splitter);
-
-
   }
 
   private InspectorService.ObjectGroup objectGroup;
@@ -483,11 +482,9 @@ public class PreviewView implements PersistentStateComponent<PreviewViewState>, 
       final SimpleToolWindowPanel window = new SimpleToolWindowPanel(true, true);
       window.setToolbar(windowToolbar.getComponent());
       propertyScrollPane = ScrollPaneFactory.createScrollPane(propertyEditPanel);
-      propertyEditSplitter.setHonorComponentsMinimumSize(false);
       window.setContent(propertyScrollPane);
       propertyEditSplitter.setFirstComponent(window.getComponent());
       propertyEditSplitter.setSecondComponent(previewArea.getComponent());
-
       splitter.setSecondComponent(propertyEditSplitter);
     }
 

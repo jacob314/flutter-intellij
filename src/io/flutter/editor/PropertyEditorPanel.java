@@ -201,7 +201,6 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
   /**
    * Whether the property panel has already triggered a pending hot reload.
    */
-
   private boolean pendingHotReload;
 
   /**
@@ -522,21 +521,41 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
           Runnable colorFieldAction = () -> {
             final ColorChooserService service = ColorChooserService.getInstance();
 
+            Color initialColor = customColor[0];
+            if (initialColor == null) {
+              initialColor = Color.GRAY;
+            }
+            // TODO(jacobr): use the color from the diagnostics properties if available.
+            final Disposable colorPickerDisposer = new Disposable() {
+
+              @Override
+              public void dispose() {
+                final Color color = customColor[0];
+                if (color != null) {
+                  final String expression = buildColorExpression(color);
+                  colorField.setText(expression);
+                  setPropertyValue(colorPropertyName, expression);
+                }
+              }
+            };
             List<ColorPickerListener> listeners = new ArrayList<>();
+            final ColorPicker picker = new ColorPicker(colorPickerDisposer, initialColor, true, true, listeners, false);
+
             listeners.add(new ColorPickerListener() {
               @Override
               public void colorChanged(Color color) {
-                long value =
+                final long value =
                   ((long)color.getAlpha() << 24) | ((long)color.getRed() << 16) | (long)(color.getGreen() << 8) | (long)color.getBlue();
                 customColor[0] = color;
                 final InspectorObjectGroupManager manager = getGroupManager();
-                final String textV = buildColorExpression(color);
+                final String colorExpression = buildColorExpression(color);
 
-                colorField.setText(textV);
+                // TODO(jacobr): colorField may no longer be the right field in the UI.
+                colorField.setText(colorExpression);
                 colorField.repaint();
+
                 if (node != null && manager != null) {
                   // TODO(jacobr): async rate limit this request?
-                  final String expectedTextValue = textV;
                   final InspectorService.ObjectGroup group = manager.getCurrent();
                   if (!pendingHotReload) {
                     CompletableFuture<Boolean> valueFuture = manager.getCurrent().setProperty(node, "color", "" + value);
@@ -545,9 +564,11 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
                         return;
                       }
                       // If setting the property immediately failed, we may have to set the property value fully to see a result.
-                      if (!success && expectedTextValue.equals(colorField.getText())) {
-                        setPropertyValue(colorPropertyName, textV);
-                      }
+                      // This code is risky because it could cause the outline to change and too many hot reloads cause flaky app behavior.
+                      /*
+                      if (!success && color.equals(picker.getColor())) {
+                        setPropertyValue(colorPropertyName, colorExpression);
+                      }*/
                     });
                   }
                 }
@@ -561,27 +582,10 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
                 setPropertyValue(colorPropertyName, expression);
               }
             });
-            final Disposable colorPickerDisposer = new Disposable() {
-
-              @Override
-              public void dispose() {
-                final Color color = customColor[0];
-                if (color != null) {
-                  final String expression = buildColorExpression(color);
-                  colorField.setText(expression);
-                  setPropertyValue(colorPropertyName, expression);
-                }
-              }
-            };
-            Color initialColor = customColor[0];
-            if (initialColor == null) {
-              initialColor = Color.GRAY;
-            }
-            // TODO(jacobr): use the color from the diagnostics properties if available.
-            final ColorPicker picker = new ColorPicker(colorPickerDisposer, initialColor, true, true, listeners, false);
-            ComponentPopupBuilder builder = JBPopupFactory.getInstance().createComponentPopupBuilder(picker, PropertyEditorPanel.this);
+            final ComponentPopupBuilder builder = JBPopupFactory.getInstance().createComponentPopupBuilder(picker, PropertyEditorPanel.this);
             builder.setMovable(true);
             builder.setFocusable(true);
+
             builder.setTitle("Select color");
 
             popup = builder.createPopup();
