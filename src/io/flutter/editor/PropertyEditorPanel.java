@@ -725,6 +725,7 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
   }
 
   private void addTextFieldListeners(String name, JBTextField field) {
+    final FlutterOutline matchingOutline = outline;
     field.addActionListener(e -> setPropertyValue(name, field.getText()));
     field.addFocusListener(new FocusListener() {
       @Override
@@ -733,6 +734,10 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel implements Dispos
 
       @Override
       public void focusLost(FocusEvent e) {
+        if (outline != matchingOutline) {
+          // Don't do anything. The user has moved on to a different outline node.
+          return;
+        }
         setPropertyValue(name, field.getText());
       }
     });
