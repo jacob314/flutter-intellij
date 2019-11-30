@@ -409,7 +409,7 @@ public abstract class PreviewViewControllerBase extends WidgetViewController {
   }
 
   @Override
-  public void onInspectorAvailable() {
+  public void onInspectorAvailabilityChanged() {
     clearState();
   }
 

@@ -56,8 +56,8 @@ public abstract class WidgetViewController implements EditorMouseEventService.Li
     Disposer.register(parent, this);
     groupClient = new InspectorGroupManagerService.Client(parent) {
       @Override
-      public void onInspectorAvailable() {
-        WidgetViewController.this.onInspectorAvailable();
+      public void onInspectorAvailabilityChanged() {
+        WidgetViewController.this.onInspectorAvailabilityChanged();
       }
 
       @Override
@@ -87,7 +87,7 @@ public abstract class WidgetViewController implements EditorMouseEventService.Li
 
   public boolean updateVisiblityLocked(Rectangle newRectangle) { return false; }
 
-  public void onInspectorAvailable() {
+  public void onInspectorAvailabilityChanged() {
     setElements(null);
     inspectorSelection = null;
     onVisibleChanged();

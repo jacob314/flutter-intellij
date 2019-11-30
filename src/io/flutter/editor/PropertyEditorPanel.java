@@ -212,7 +212,7 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel {
 
     inspectorStateServiceClient = new InspectorGroupManagerService.Client(parentDisposable) {
       @Override
-      public void onInspectorAvailable() {
+      public void onInspectorAvailabilityChanged() {
         // The app has terminated or restarted. No way we are still waiting
         // for a pending hot reload.
         pendingHotReload = false;
