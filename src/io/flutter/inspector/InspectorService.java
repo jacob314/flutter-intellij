@@ -744,6 +744,9 @@ public class InspectorService implements Disposable {
     }
 
     public CompletableFuture<ArrayList<DiagnosticsNode>> getElementsAtLocation(Location location, int count) {
+      if (location == null || location.getPath() == null) {
+        return CompletableFuture.completedFuture(null);
+      }
       final JsonObject params = new JsonObject();
       addLocationToParams(location, params);
       params.addProperty("count", count);
@@ -878,6 +881,92 @@ public class InspectorService implements Disposable {
       });
     }
 
+    /**
+     * Method added for backwards compatibility with versions of Flutter that do not yet support this method.
+     */
+    public CompletableFuture<TransformedRect> getScreenshotRectPolyfill(DiagnosticsNode target, int width, int height, double pixelRatio) {
+
+      if (target == null || target.getValueRef() == null) return CompletableFuture.completedFuture(null);
+
+      final String command =
+        "  Map<String, Object> getScreenshotTransformedRect(String id,\n" +
+        "    int width, int height, double pixelRatio) {\n" +
+        "\n" +
+        "  Matrix4 buildImageTransform(OffsetLayer layer, Rect bounds,\n" +
+        "      {double pixelRatio = 1.0}) {\n" +
+        "    final Matrix4 transform = Matrix4.translationValues(\n" +
+        "      (-bounds.left - layer.offset.dx) * pixelRatio,\n" +
+        "      (-bounds.top - layer.offset.dy) * pixelRatio,\n" +
+        "      0.0,\n" +
+        "    );\n" +
+        "    transform.scale(pixelRatio, pixelRatio);\n" +
+        "    return transform;\n" +
+        "  }\n" +
+        "\n" +
+        "  Map<String, Object> transformedRectToJson(Rect rect, Matrix4 transform) {\n" +
+        "    if (rect == null || transform == null) {\n" +
+        "      return null;\n" +
+        "    }\n" +
+        "    return <String, Object>{\n" +
+        "      'left': rect.left,\n" +
+        "      'top': rect.top,\n" +
+        "      'width': rect.width,\n" +
+        "      'height': rect.height,\n" +
+        "      'transform': transform.storage.toList(),\n" +
+        "    };\n" +
+        "  }\n" +
+        "\n" +
+        "  Map<String, Object> buildTransformedRect(RenderObject renderObject,\n" +
+        "      double maxPixelRatio) {\n" +
+        "    if (renderObject == null || !renderObject.attached) {\n" +
+        "      return null;\n" +
+        "    }\n" +
+        "    final Rect renderBounds = _calculateSubtreeBounds(renderObject);\n" +
+        "\n" +
+        "    final double pixelRatio = math.min(\n" +
+        "      maxPixelRatio,\n" +
+        "      math.min(\n" +
+        "        width / renderBounds.width,\n" +
+        "        height / renderBounds.height,\n" +
+        "      ),\n" +
+        "    );\n" +
+        "\n" +
+        "    final layer = renderObject.debugLayer;\n" +
+        "    if (layer is! OffsetLayer) return null;\n" +
+        "    final OffsetLayer containerLayer = layer;\n" +
+        "    return transformedRectToJson(\n" +
+        "      renderBounds,\n" +
+        "      buildImageTransform(\n" +
+        "          containerLayer, renderBounds.shift(-containerLayer.offset),\n" +
+        "          pixelRatio: pixelRatio),\n" +
+        "    );\n" +
+        "  }\n" +
+        "\n" +
+        "  Object o = WidgetInspectorService.instance.toObject(id);\n" +
+        "  if (o == null) return null;\n" +
+        "  RenderObject r;\n" +
+        "  if (o is RenderObject) {\n" +
+        "    r = o;\n" +
+        "  } else if (o is Element) {\n" +
+        "    r = o.renderObject;\n" +
+        "  } else {\n" +
+        "    return null;\n" +
+        "  }\n" +
+        "  return buildTransformedRect(r, pixelRatio);\n" +
+        "}\n" +
+        "  return WidgetInspectorService.instance._safeJsonEncode(getScreenshotTransformedRect('" + target.getValueRef().getId() + "'," + width + "," + height + "," + pixelRatio + ") ?? <String,Object>{});\n";
+
+      return evaluateCustomApiHelper(command, new HashMap<>()).thenComposeAsync((instanceRef) -> {
+        if (instanceRef == null) return CompletableFuture.completedFuture(null);
+        return nullIfDisposed(() -> instanceRefToJson(instanceRef)).thenApplyAsync((json) -> {
+          if (json == null) return null;
+          System.out.println("XXX json = " + json);
+          return new TransformedRect(json.getAsJsonObject());
+        });
+      });
+    }
+
+
     private CompletableFuture<InstanceRef> evaluateCustomApiHelper(String command, Map<String, String> scope) {
       // Avoid running command if we interrupted executing code as results will
       // be weird. Repeatedly run the command until we hit idle.
@@ -894,9 +983,11 @@ public class InspectorService implements Disposable {
       for (String l : commandLines) {
         lines.add(l);
       }
-      lines.add(")()");
+      lines.add("})()");
 
       // Strip out line breaks as that makes the VM evaluate expression api unhappy.
+      System.out.println("XXX expr ===========\n"+ Joiner.on("\n").join(lines) + "\n=====================");
+
       final String expression = Joiner.on("").join(lines);
       return evalWithRetry(expression, scope);
     }
@@ -916,7 +1007,10 @@ public class InspectorService implements Disposable {
           }
           return CompletableFuture.completedFuture(instanceRef);
         }
-      );
+      ).exceptionally((e) -> {
+        System.out.println("Expression evaluation exception: " + e);
+        return null;
+      });
     }
 
     public CompletableFuture<InteractiveScreenshot> getScreenshotAtLocation(
@@ -925,6 +1019,30 @@ public class InspectorService implements Disposable {
       int width,
       int height,
       double maxPixelRatio) {
+      if (!hasServiceMethod("_screenshotAtLocation")) {
+        // Polyfill for legacy versions of Flutter
+        // Legacy path for versions of Flutter missing the latest screenshot fetching apis.
+        if (location != null) {
+          // We can't support this case for the legacy app case.
+          return CompletableFuture.completedFuture(null);
+        }
+
+        final CompletableFuture<DiagnosticsNode> renderObject = getRootRenderObject();
+        return renderObject.thenComposeAsync((DiagnosticsNode node) -> {
+          if (node == null) {
+            return CompletableFuture.completedFuture(null);
+          }
+          return getScreenshot(node.getValueRef(), width, height, maxPixelRatio).thenComposeAsync((Screenshot screenshot) -> {
+            if(screenshot == null) return CompletableFuture.completedFuture(null);
+            return getScreenshotRectPolyfill(node, width, height, maxPixelRatio).thenApplyAsync((transformedRect) -> {
+              if (transformedRect == null) return null;
+              final Screenshot screenshotWithRect = new Screenshot(screenshot.image, screenshot.transformedRect);
+              return new InteractiveScreenshot(screenshotWithRect, null, null);
+            });
+          });
+        });
+      }
+
       final JsonObject params = new JsonObject();
       addLocationToParams(location, params);
       params.addProperty("count", count);
@@ -943,7 +1061,7 @@ public class InspectorService implements Disposable {
             Screenshot screenshot = null;
             final JsonElement screenshotJson = result.get("screenshot");
             if (screenshotJson != null && !screenshotJson.isJsonNull()) {
-              screenshot = getScreenshotFromJson(screenshotJson.getAsJsonObject());
+              screenshot = getScreenshotFromJsonObject(screenshotJson.getAsJsonObject());
             }
             return new InteractiveScreenshot(
               screenshot,
@@ -963,20 +1081,35 @@ public class InspectorService implements Disposable {
 
       return nullIfDisposed(
         () -> inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshot", params).thenApplyAsync((JsonObject response) -> {
-          if (response == null || response.get("result").isJsonNull()) {
+          if (response == null) {
             // No screenshot avaiable.
             return null;
           }
-          final JsonObject result = response.getAsJsonObject("result");
+          final JsonElement result = response.get("result");
+          if (result.isJsonNull()) {
+            return null;
+          }
 
-          return getScreenshotFromJson(result);
-        }));
+          if (result.isJsonObject()) {
+            return getScreenshotFromJsonObject(result.getAsJsonObject());
+          } else {
+            // Legacy case.
+            return new Screenshot(getImage(result.getAsString()), null);
+          }
+        })
+      );
     }
 
     @NotNull
-    private Screenshot getScreenshotFromJson(JsonObject result) {
+    private Screenshot getScreenshotFromJsonObject(JsonObject result) {
       final String imageString = result.getAsJsonPrimitive("image").getAsString();
       // create a buffered image
+      final BufferedImage image = getImage(imageString);
+      final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
+      return new Screenshot(image, transformedRect);
+    }
+
+    private BufferedImage getImage(String imageString) {
       final Base64.Decoder decoder = Base64.getDecoder();
       final byte[] imageBytes = decoder.decode(imageString);
       final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(imageBytes);
@@ -988,9 +1121,7 @@ public class InspectorService implements Disposable {
       catch (IOException e) {
         throw new RuntimeException("Error decoding image: " + e.getMessage());
       }
-
-      final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
-      return new Screenshot(image, transformedRect);
+      return image;
     }
 
     CompletableFuture<InstanceRef> invokeEval(String methodName, InspectorInstanceRef arg) {
