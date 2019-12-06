@@ -37,7 +37,7 @@ public class InspectorInstanceRef {
 
   @Override
   public String toString() {
-    return "instance-" + id;
+    return id;
   }
 
   public String getId() {

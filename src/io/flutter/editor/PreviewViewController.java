@@ -75,6 +75,7 @@ public class PreviewViewController extends PreviewViewControllerBase {
 
   @Override
   protected Dimension getPreviewSize() {
+    if (screenshotBoundsOverride == null) return new Dimension(0,0);
     return screenshotBoundsOverride.getSize();
   }
 

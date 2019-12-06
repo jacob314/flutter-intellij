@@ -41,6 +41,11 @@ import java.util.concurrent.TimeoutException;
 public class EvalOnDartLibrary implements Disposable {
   private static final Logger LOG = Logger.getInstance(EvalOnDartLibrary.class);
 
+  /**
+   * Change the value of this flag to debug evaluation calls made by WidgetInspector backport evaluation expressions.
+   */
+  private static final boolean DEBUG_SERVICE_METHODS = true;
+
   private final StreamSubscription<IsolateRef> subscription;
   private final ScheduledThreadPoolExecutor delayer;
   private String isolateId;
@@ -188,7 +193,7 @@ public class EvalOnDartLibrary implements Disposable {
       final CompletableFuture<InstanceRef> future = new CompletableFuture<>();
       libraryRef.thenAcceptAsync((LibraryRef ref) -> vmService.evaluate(
         getIsolateId(), ref.getId(), expression,
-        scope, true,
+        scope, !DEBUG_SERVICE_METHODS,
         new EvaluateConsumer() {
           @Override
           public void onError(RPCError error) {
