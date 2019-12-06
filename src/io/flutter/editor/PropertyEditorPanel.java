@@ -415,6 +415,9 @@ public class PropertyEditorPanel extends SimpleToolWindowPanel {
     node = null;
     final InspectorService.ObjectGroup group = groupManager.getNext();
     final InspectorService.Location location = getInspectorLocation();
+    if (location == null) {
+      return;
+    }
     group.safeWhenComplete(group.getElementsAtLocation(location, 10), (elements, error) -> {
       if (elements == null || error != null) {
         return;

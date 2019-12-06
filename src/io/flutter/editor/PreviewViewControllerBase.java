@@ -105,9 +105,7 @@ public abstract class PreviewViewControllerBase extends WidgetViewController {
 
   AsyncRateLimiter getScreenshotRateLimiter() {
     if (screenshotRateLimiter != null) return screenshotRateLimiter;
-    screenshotRateLimiter = new AsyncRateLimiter(SCREENSHOT_FRAMES_PER_SECOND, () -> {
-      return updateScreenshot();
-    }, this);
+    screenshotRateLimiter = new AsyncRateLimiter(SCREENSHOT_FRAMES_PER_SECOND, this::updateScreenshot, this);
     return screenshotRateLimiter;
   }
 
@@ -143,7 +141,7 @@ public abstract class PreviewViewControllerBase extends WidgetViewController {
   Rectangle getScreenshotBoundsTight() {
     // TODO(jacobr): cache this.
     if (screenshotBounds == null || extraHeight == 0) return screenshotBounds;
-    Rectangle bounds = new Rectangle(screenshotBounds);
+    final Rectangle bounds = new Rectangle(screenshotBounds);
     bounds.height -= extraHeight;
     bounds.y += extraHeight;
     return bounds;

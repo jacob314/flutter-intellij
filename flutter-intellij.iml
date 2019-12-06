@@ -19,6 +19,9 @@
       <excludeFolder url="file://$MODULE_DIR$/build" />
       <excludeFolder url="file://$MODULE_DIR$/material-design-icons" />
       <excludeFolder url="file://$MODULE_DIR$/releases" />
+      <excludeFolder url="file://$MODULE_DIR$/src/io/flutter/inspector/polyfills/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/src/io/flutter/inspector/polyfills/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/src/io/flutter/inspector/polyfills/build" />
       <excludeFolder url="file://$MODULE_DIR$/src/main" />
       <excludeFolder url="file://$MODULE_DIR$/testData" />
       <excludeFolder url="file://$MODULE_DIR$/testData/sample_tests/.dart_tool" />

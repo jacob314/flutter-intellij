@@ -6,6 +6,7 @@
 package io.flutter.inspector;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.gson.*;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
@@ -48,6 +49,7 @@ import java.io.IOException;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
@@ -88,11 +90,13 @@ public class InspectorService implements Disposable {
       return file;
     }
 
-    public @NotNull String getPath() {
+    public @NotNull
+    String getPath() {
       return toSourceLocationUri(file.getPath());
     }
 
-    public @NotNull XSourcePosition getXSourcePosition() {
+    public @NotNull
+    XSourcePosition getXSourcePosition() {
       if (file == null) {
         return null;
       }
@@ -163,6 +167,20 @@ public class InspectorService implements Disposable {
       final int column = nodeOffset - lineStartOffset;
       return new InspectorService.Location(file, line + 1, column + 1, nodeOffset);
     }
+
+    /**
+     * Generate a Dart expression literal defining this location in a format
+     * compatible with package:flutter/src/widgets/widget_inspector.dart
+     */
+    public static String toDartExpression(Location location) {
+      if (location == null) return "null";
+      return
+        "_Location(" +
+        "file: '" + location.getPath() + "',\n" +
+        "line: " + location.getLine() + ",\n" +
+        "column: " + location.getColumn() + ",\n" +
+        ")";
+    }
   }
 
   private static int nextGroupId = 0;
@@ -187,6 +205,7 @@ public class InspectorService implements Disposable {
   @NotNull private final Set<String> supportedServiceMethods;
 
   private final StreamSubscription<Boolean> setPubRootDirectoriesSubscription;
+  private DiagnosticsNode currentSelection;
 
   /**
    * Convenience ObjectGroup constructor for users who need to use DiagnosticsNode objects before the InspectorService is available.
@@ -296,7 +315,7 @@ public class InspectorService implements Disposable {
   public boolean isHotUiScreenMirrorSupported() {
     // Somewhat arbitrarily chosen new API that is required for full Hot UI
     // support.
-    return hasServiceMethod("getBoundingBoxes");
+    return true; // hasServiceMethod("getBoundingBoxes");
   }
 
   /**
@@ -329,6 +348,66 @@ public class InspectorService implements Disposable {
   public void dispose() {
     Disposer.dispose(inspectorLibrary);
     Disposer.dispose(setPubRootDirectoriesSubscription);
+    currentSelection = null;
+    _selectionGroups.clear(false);
+    expectedSelectionChanges.clear();
+  }
+
+  /// Map from InspectorInstanceRef to list of timestamps when a selection
+  /// change to that ref was triggered by this application.
+  ///
+  /// This is needed to handle the case where we may send multiple selection
+  /// change notifications to the device before we get a notification back that
+  /// the selection has actually changed. Without this fix it was rare but
+  /// possible to trigger an infinite loop ping-ponging back and forth between
+  /// selecting two different nodes in the inspector tree if the selection was
+  /// changed more rapidly than the running flutter app could update.
+  final ArrayListMultimap<InspectorInstanceRef, Long> expectedSelectionChanges = ArrayListMultimap.create();
+
+  /// Maximum time in milliseconds that we ever expect it will take for a
+  /// selection change to apply.
+  ///
+  /// In general this heuristic based time should not matter but we keep it
+  /// anyway so that in the unlikely event that package:flutter changes and we
+  /// do not received all of the selection notification events we expect, we
+  /// will not be impacted if there is at least the following delay between
+  /// when selection was set to exactly the same location by both the on device
+  /// inspector and DevTools.
+  static final long _maxTimeDelaySelectionNotification = 5000;
+
+  public void trackClientSelfTriggeredSelection(InspectorInstanceRef ref) {
+    expectedSelectionChanges.put(ref, System.currentTimeMillis());
+  }
+
+  /**
+   * Returns whether the selection change was originally triggered by this
+   * application.
+   * <p>
+   * This method is needed to avoid a race condition when there is a queue of
+   * inspector selection changes due to extremely rapidly navigating through
+   * the inspector tree such as when using the keyboard to navigate.
+   */
+  boolean isClientTriggeredSelectionChange(InspectorInstanceRef ref) {
+    // TODO(jacobr): once https://github.com/flutter/flutter/issues/39366 is
+    // fixed in all versions of flutter we support, remove this logic and
+    // determine the source of the inspector selection change directly from the
+    // inspector selection changed event.
+    final long currentTime = System.currentTimeMillis();
+    if (ref != null) {
+      if (expectedSelectionChanges.containsKey(ref)) {
+        final List<Long> times = expectedSelectionChanges.removeAll(ref);
+        for (long time : times) {
+          if (time + _maxTimeDelaySelectionNotification >= currentTime) {
+            // We triggered this selection change ourselves. This logic would
+            // work fine without the timestamps for the typical case but we use
+            // the timestamps to be safe in case there is a bug and selection
+            // change events were somehow lost.
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   public CompletableFuture<?> forceRefresh() {
@@ -347,11 +426,30 @@ public class InspectorService implements Disposable {
     return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
   }
 
+  private final InspectorObjectGroupManager _selectionGroups = new InspectorObjectGroupManager(this, "selection");
+
   private void notifySelectionChanged(boolean uiAlreadyUpdated, boolean textEditorUpdated) {
     ApplicationManager.getApplication().invokeLater(() -> {
-      for (InspectorServiceClient client : clients) {
-        client.onInspectorSelectionChanged(uiAlreadyUpdated, textEditorUpdated);
-      }
+      // The previous selection changed event is obsolete.
+      _selectionGroups.cancelNext();
+      final ObjectGroup group = _selectionGroups.getNext();
+      group.safeWhenComplete(group.getSelection(null, FlutterTreeType.widget, false), (pendingSelection, error) -> {
+        if (pendingSelection == null || error != null || group.isDisposed()) return;
+
+        if (isClientTriggeredSelectionChange(pendingSelection.getValueRef())) {
+          return;
+        }
+
+        currentSelection = pendingSelection;
+        // TODO(jacobr): consider exposing currentSelection.
+
+        assert (group == _selectionGroups.getNext());
+        _selectionGroups.promoteNext();
+
+        for (InspectorServiceClient client : clients) {
+          client.onInspectorSelectionChanged(uiAlreadyUpdated, textEditorUpdated);
+        }
+      });
     });
   }
 
@@ -744,9 +842,13 @@ public class InspectorService implements Disposable {
     }
 
     public CompletableFuture<ArrayList<DiagnosticsNode>> getElementsAtLocation(Location location, int count) {
-      if (location == null || location.getPath() == null) {
+      if (location == null) {
         return CompletableFuture.completedFuture(null);
       }
+      if (!hasServiceMethod("_getElements")) {
+        return getElementsAtLocationPolyfill(location, count);
+      }
+
       final JsonObject params = new JsonObject();
       addLocationToParams(location, params);
       params.addProperty("count", count);
@@ -781,10 +883,15 @@ public class InspectorService implements Disposable {
                                                                  String file,
                                                                  int startLine,
                                                                  int endLine) {
-      final JsonObject params = new JsonObject();
       if (root == null || root.getValueRef() == null) {
         return CompletableFuture.completedFuture(new ArrayList<>());
       }
+
+      if (!hasServiceMethod("_getElements")) {
+        return hitTestPolyfill(root, dx, dy, file, startLine, endLine);
+      }
+
+      final JsonObject params = new JsonObject();
       params.addProperty("id", root.getValueRef().getId());
       params.addProperty("dx", dx);
       params.addProperty("dy", dy);
@@ -814,6 +921,7 @@ public class InspectorService implements Disposable {
 
       if (target == null || target.getValueRef() == null || color == null) return CompletableFuture.completedFuture(false);
 
+      // TODO(jacobr): mode this command to InspectorPolyfills.java
       String command =
         "final object = WidgetInspectorService.instance.toObject('" +
         target.getValueRef().getId() +
@@ -876,7 +984,7 @@ public class InspectorService implements Disposable {
         "}\n" +
         "return false;\n";
 
-      return evaluateCustomApiHelper(command, new HashMap<>()).thenApplyAsync((instanceRef) -> {
+      return evaluateCustomApiHelper(command, new HashMap<>(), 3).thenApplyAsync((instanceRef) -> {
         return instanceRef != null && "true".equals(instanceRef.getValueAsString());
       });
     }
@@ -884,79 +992,20 @@ public class InspectorService implements Disposable {
     /**
      * Method added for backwards compatibility with versions of Flutter that do not yet support this method.
      */
+    // XXX remove?
     public CompletableFuture<TransformedRect> getScreenshotRectPolyfill(DiagnosticsNode target, int width, int height, double pixelRatio) {
 
       if (target == null || target.getValueRef() == null) return CompletableFuture.completedFuture(null);
 
-      final String command =
-        "  Map<String, Object> getScreenshotTransformedRect(String id,\n" +
-        "    int width, int height, double pixelRatio) {\n" +
-        "\n" +
-        "  Matrix4 buildImageTransform(OffsetLayer layer, Rect bounds,\n" +
-        "      {double pixelRatio = 1.0}) {\n" +
-        "    final Matrix4 transform = Matrix4.translationValues(\n" +
-        "      (-bounds.left - layer.offset.dx) * pixelRatio,\n" +
-        "      (-bounds.top - layer.offset.dy) * pixelRatio,\n" +
-        "      0.0,\n" +
-        "    );\n" +
-        "    transform.scale(pixelRatio, pixelRatio);\n" +
-        "    return transform;\n" +
-        "  }\n" +
-        "\n" +
-        "  Map<String, Object> transformedRectToJson(Rect rect, Matrix4 transform) {\n" +
-        "    if (rect == null || transform == null) {\n" +
-        "      return null;\n" +
-        "    }\n" +
-        "    return <String, Object>{\n" +
-        "      'left': rect.left,\n" +
-        "      'top': rect.top,\n" +
-        "      'width': rect.width,\n" +
-        "      'height': rect.height,\n" +
-        "      'transform': transform.storage.toList(),\n" +
-        "    };\n" +
-        "  }\n" +
-        "\n" +
-        "  Map<String, Object> buildTransformedRect(RenderObject renderObject,\n" +
-        "      double maxPixelRatio) {\n" +
-        "    if (renderObject == null || !renderObject.attached) {\n" +
-        "      return null;\n" +
-        "    }\n" +
-        "    final Rect renderBounds = _calculateSubtreeBounds(renderObject);\n" +
-        "\n" +
-        "    final double pixelRatio = math.min(\n" +
-        "      maxPixelRatio,\n" +
-        "      math.min(\n" +
-        "        width / renderBounds.width,\n" +
-        "        height / renderBounds.height,\n" +
-        "      ),\n" +
-        "    );\n" +
-        "\n" +
-        "    final layer = renderObject.debugLayer;\n" +
-        "    if (layer is! OffsetLayer) return null;\n" +
-        "    final OffsetLayer containerLayer = layer;\n" +
-        "    return transformedRectToJson(\n" +
-        "      renderBounds,\n" +
-        "      buildImageTransform(\n" +
-        "          containerLayer, renderBounds.shift(-containerLayer.offset),\n" +
-        "          pixelRatio: pixelRatio),\n" +
-        "    );\n" +
-        "  }\n" +
-        "\n" +
-        "  Object o = WidgetInspectorService.instance.toObject(id);\n" +
-        "  if (o == null) return null;\n" +
-        "  RenderObject r;\n" +
-        "  if (o is RenderObject) {\n" +
-        "    r = o;\n" +
-        "  } else if (o is Element) {\n" +
-        "    r = o.renderObject;\n" +
-        "  } else {\n" +
-        "    return null;\n" +
-        "  }\n" +
-        "  return buildTransformedRect(r, pixelRatio);\n" +
-        "}\n" +
-        "  return WidgetInspectorService.instance._safeJsonEncode(getScreenshotTransformedRect('" + target.getValueRef().getId() + "'," + width + "," + height + "," + pixelRatio + ") ?? <String,Object>{});\n";
+      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getScreenshotTransformedRect") +
+                             "return WidgetInspectorService.instance._safeJsonEncode(getScreenshotTransformedRect('" +
+                             target.getValueRef().getId() +  "'," +
+                             width +  "," +
+                             height +  "," +
+                             pixelRatio +
+                             ") ?? <String,Object>{});";
 
-      return evaluateCustomApiHelper(command, new HashMap<>()).thenComposeAsync((instanceRef) -> {
+      return evaluateCustomApiHelper(command, new HashMap<>(), 3).thenComposeAsync((instanceRef) -> {
         if (instanceRef == null) return CompletableFuture.completedFuture(null);
         return nullIfDisposed(() -> instanceRefToJson(instanceRef)).thenApplyAsync((json) -> {
           if (json == null) return null;
@@ -966,8 +1015,96 @@ public class InspectorService implements Disposable {
       });
     }
 
+    private CompletableFuture<InteractiveScreenshot> getScreenshotAtLocationPolyfill(Location location,
+                                                                                     int count,
+                                                                                     int width,
+                                                                                     int height,
+                                                                                     double pixelRatio) {
+      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getScreenshotAtLocation") +
+                             "return WidgetInspectorService.instance._safeJsonEncode(getScreenshotAtLocation(" +
+                             Location.toDartExpression(location) + "," +
+                             count + "," +
+                             width + "," +
+                             height + "," +
+                             pixelRatio + "," +
+                             "'" + groupName + "'" + "," +
+                             ") ?? <String,Object>{});";
+/*
+      final String command =
+                             "return WidgetInspectorService.instance._safeJsonEncode(getScreenshotAtLocation3(" +
+                             Location.toDartExpression(location) + "," +
+                             count + "," +
+                             width + "," +
+                             height + "," +
+                             pixelRatio + "," +
+                             "'" + groupName + "'" + "," +
+                             ") ?? <String,Object>{});";
+*/
+      return evaluateCustomApiHelper(command, new HashMap<>(), 3).thenComposeAsync(
+        (instanceRef) -> nullIfDisposed(() -> instanceRefToJson(instanceRef)).thenApplyAsync(this::parseInteractiveScreenshotResponse));
+    }
 
-    private CompletableFuture<InstanceRef> evaluateCustomApiHelper(String command, Map<String, String> scope) {
+
+    private CompletableFuture<ArrayList<DiagnosticsNode>> getElementsAtLocationPolyfill(Location location, int count) {
+      if (location == null) return CompletableFuture.completedFuture(null);
+
+      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getElementsAtLocation") +
+                             "return WidgetInspectorService.instance._safeJsonEncode(getElementsAtLocation(\n" +
+                             Location.toDartExpression(location) + "," +
+                             count + ",\n" +
+                             "'" + groupName + "',\n" +
+                             ") ?? []);";
+
+      return evaluateCustomApiHelper(command, new HashMap<>(), 3).thenComposeAsync(
+        (instanceRef) -> nullIfDisposed(() -> parseDiagnosticsNodesVmService(instanceRef, null))
+      );
+    }
+
+    private CompletableFuture<ArrayList<DiagnosticsNode>> hitTestPolyfill(DiagnosticsNode root,
+                                                                          double dx,
+                                                                          double dy,
+                                                                          String file,
+                                                                          int startLine,
+                                                                          int endLine) {
+      String command = InspectorPolyfills.getInstance().getPolyfillMethod("hitTest") +
+                       "return WidgetInspectorService.instance._safeJsonEncode(hitTest(\n" +
+                       "'" + root.getValueRef() + "',\n";
+      if (file != null) {
+        command += "'" + file + "',\n";
+      } else {
+        command += "null,\n";
+      }
+      if (startLine >= 0 && endLine >= 0) {
+        command += "startLine: " + startLine + ",\n";
+        command += "endLine: " + endLine + ",\n";
+      } else {
+        command += "null,\n";
+        command += "null,\n";
+      }
+      command += "Offset(" + dx + "," + dy + "),\n";
+      command += "'" + groupName + "',\n" +
+                 ") ?? []);";
+
+      return evaluateCustomApiHelper(command, new HashMap<>(), 3).thenComposeAsync(
+        (instanceRef) -> nullIfDisposed(() -> parseDiagnosticsNodesVmService(instanceRef, null))
+      );
+    }
+
+
+    private CompletableFuture<InstanceRef> setSelectionByLocationPolyfill(Location location) {
+      if (location == null) return CompletableFuture.completedFuture(null);
+
+      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("setSelectionByLocation") +
+                             "return setSelectionByLocation(\n" +
+                             "_Location(file: '" + location.getPath() + "',\n" +
+                             "line: " + location.getLine() + ",\n" +
+                             "column: " + location.getColumn() + ",\n" +
+                             ")) ?? false;";
+
+      return evaluateCustomApiHelper(command, new HashMap<>(), 0);
+    }
+
+    private CompletableFuture<InstanceRef> evaluateCustomApiHelper(String command, Map<String, String> scope, int retryCount) {
       // Avoid running command if we interrupted executing code as results will
       // be weird. Repeatedly run the command until we hit idle.
       // We cannot execute the command at a later point due to eval bugs where
@@ -986,28 +1123,31 @@ public class InspectorService implements Disposable {
       lines.add("})()");
 
       // Strip out line breaks as that makes the VM evaluate expression api unhappy.
-      System.out.println("XXX expr ===========\n"+ Joiner.on("\n").join(lines) + "\n=====================");
+      System.out.println("XXX expr ===========\n" + Joiner.on("\n").join(lines) + "\n=====================");
 
       final String expression = Joiner.on("").join(lines);
-      return evalWithRetry(expression, scope);
+      return evalWithRetry(expression, scope, retryCount);
     }
 
-    private CompletableFuture<InstanceRef> evalWithRetry(String expression, Map<String, String> scope) {
+    private CompletableFuture<InstanceRef> evalWithRetry(String expression, Map<String, String> scope, int retryCount) {
       if (isDisposed()) return CompletableFuture.completedFuture(null);
 
       return inspectorLibrary.eval(expression, scope, this).thenComposeAsync(
         (instanceRef) -> {
-          if (instanceRef == null) {
+          if (instanceRef == null || (instanceRef.isNull() && retryCount <= 0 || isDisposed())) {
             // A null value indicates the request was cancelled.
             return CompletableFuture.completedFuture(instanceRef);
           }
           if (instanceRef.isNull()) {
             // An InstanceRef with an explicitly null return value indicates we should issue the request again.
-            return evalWithRetry(expression, scope);
+            return evalWithRetry(expression, scope, retryCount - 1);
           }
           return CompletableFuture.completedFuture(instanceRef);
         }
       ).exceptionally((e) -> {
+        if (isDisposed()) {
+          return null;
+        }
         System.out.println("Expression evaluation exception: " + e);
         return null;
       });
@@ -1020,27 +1160,33 @@ public class InspectorService implements Disposable {
       int height,
       double maxPixelRatio) {
       if (!hasServiceMethod("_screenshotAtLocation")) {
-        // Polyfill for legacy versions of Flutter
-        // Legacy path for versions of Flutter missing the latest screenshot fetching apis.
-        if (location != null) {
-          // We can't support this case for the legacy app case.
-          return CompletableFuture.completedFuture(null);
-        }
+        return getScreenshotAtLocationPolyfill(location, count, width, height, maxPixelRatio)
+          .thenComposeAsync(
+            (InteractiveScreenshot backportScreenshot) -> {
+              if (backportScreenshot == null) {
+                return CompletableFuture.completedFuture(null);
+              }
 
-        final CompletableFuture<DiagnosticsNode> renderObject = getRootRenderObject();
-        return renderObject.thenComposeAsync((DiagnosticsNode node) -> {
-          if (node == null) {
-            return CompletableFuture.completedFuture(null);
-          }
-          return getScreenshot(node.getValueRef(), width, height, maxPixelRatio).thenComposeAsync((Screenshot screenshot) -> {
-            if(screenshot == null) return CompletableFuture.completedFuture(null);
-            return getScreenshotRectPolyfill(node, width, height, maxPixelRatio).thenApplyAsync((transformedRect) -> {
-              if (transformedRect == null) return null;
-              final Screenshot screenshotWithRect = new Screenshot(screenshot.image, screenshot.transformedRect);
-              return new InteractiveScreenshot(screenshotWithRect, null, null);
-            });
-          });
-        });
+              if (backportScreenshot.elements == null || backportScreenshot.elements.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+              }
+              final DiagnosticsNode node = backportScreenshot.elements.get(0);
+              assert (backportScreenshot.screenshot.image == null);
+              assert (backportScreenshot.screenshot.transformedRect != null);
+              return getScreenshot(node.getValueRef(), width, height, maxPixelRatio).thenApplyAsync(
+                (screenshot) -> {
+                  if (screenshot == null) {
+                    return null;
+                  }
+                  // Make sure our assumptions about what information is where are correct.
+                  assert (screenshot.image != null);
+                  assert (screenshot.transformedRect == null);
+
+                  final Screenshot screenshotWithRect = new Screenshot(screenshot.image, backportScreenshot.screenshot.transformedRect);
+                  return new InteractiveScreenshot(screenshotWithRect, backportScreenshot.boxes, backportScreenshot.elements);
+                });
+            }
+          );
       }
 
       final JsonObject params = new JsonObject();
@@ -1052,24 +1198,30 @@ public class InspectorService implements Disposable {
       params.addProperty("groupName", groupName);
       return nullIfDisposed(() -> {
         return inspectorLibrary.invokeServiceMethod("ext.flutter.inspector.screenshotAtLocation", params).thenApplyAsync(
-          (JsonObject response) -> {
-            if (response == null || response.get("result").isJsonNull()) {
-              // No screenshot available.
-              return null;
-            }
-            final JsonObject result = response.getAsJsonObject("result");
-            Screenshot screenshot = null;
-            final JsonElement screenshotJson = result.get("screenshot");
-            if (screenshotJson != null && !screenshotJson.isJsonNull()) {
-              screenshot = getScreenshotFromJsonObject(screenshotJson.getAsJsonObject());
-            }
-            return new InteractiveScreenshot(
-              screenshot,
-              parseDiagnosticsNodesHelper(result.get("boxes"), null),
-              parseDiagnosticsNodesHelper(result.get("elements"), null)
-            );
-          });
+          this::parseInteractiveScreenshotResponse);
       });
+    }
+
+    InteractiveScreenshot parseInteractiveScreenshotResponse(JsonElement responseElement) {
+      System.out.println("XXX resopose = " + responseElement);
+      if (responseElement == null) return null;
+      if (!responseElement.isJsonObject()) return null;
+      final JsonObject response = responseElement.getAsJsonObject();
+      if (response == null || response.get("result").isJsonNull()) {
+        // No screenshot available.
+        return null;
+      }
+      final JsonObject result = response.getAsJsonObject("result");
+      Screenshot screenshot = null;
+      final JsonElement screenshotJson = result.get("screenshot");
+      if (screenshotJson != null && !screenshotJson.isJsonNull()) {
+        screenshot = getScreenshotFromJsonObject(screenshotJson.getAsJsonObject());
+      }
+      return new InteractiveScreenshot(
+        screenshot,
+        parseDiagnosticsNodesHelper(result.get("boxes"), null),
+        parseDiagnosticsNodesHelper(result.get("elements"), null)
+      );
     }
 
     public CompletableFuture<Screenshot> getScreenshot(InspectorInstanceRef ref, int width, int height, double maxPixelRatio) {
@@ -1092,7 +1244,8 @@ public class InspectorService implements Disposable {
 
           if (result.isJsonObject()) {
             return getScreenshotFromJsonObject(result.getAsJsonObject());
-          } else {
+          }
+          else {
             // Legacy case.
             return new Screenshot(getImage(result.getAsString()), null);
           }
@@ -1102,10 +1255,23 @@ public class InspectorService implements Disposable {
 
     @NotNull
     private Screenshot getScreenshotFromJsonObject(JsonObject result) {
-      final String imageString = result.getAsJsonPrimitive("image").getAsString();
-      // create a buffered image
-      final BufferedImage image = getImage(imageString);
-      final TransformedRect transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
+      final BufferedImage image;
+
+      final JsonElement imageJson = result.get("image");
+      if (imageJson != null && !imageJson.isJsonNull()) {
+        final String imageString = result.getAsString();
+        image = getImage(imageString);
+      } else {
+        image = null;
+      }
+
+      final JsonElement transformJson = result.get("transformedRect");
+      final TransformedRect transformedRect;
+      if (transformJson != null && !transformJson.isJsonNull()) {
+        transformedRect = new TransformedRect(result.getAsJsonObject("transformedRect"));
+      } else {
+        transformedRect = null;
+      }
       return new Screenshot(image, transformedRect);
     }
 
@@ -1243,6 +1409,7 @@ public class InspectorService implements Disposable {
      * Requires that the InstanceRef is really referring to a String that is valid JSON.
      */
     CompletableFuture<JsonElement> instanceRefToJson(InstanceRef instanceRef) {
+      if (instanceRef == null) { return null; }
       if (instanceRef.getValueAsString() != null && !instanceRef.getValueAsStringIsTruncated()) {
         // In some situations, the string may already be fully populated.
         final JsonElement json = new JsonParser().parse(instanceRef.getValueAsString());
@@ -1253,6 +1420,7 @@ public class InspectorService implements Disposable {
         return nullIfDisposed(() -> getInspectorLibrary().getInstance(instanceRef, this).thenApplyAsync((Instance instance) -> {
           return nullValueIfDisposed(() -> {
             final String json = instance.getValueAsString();
+            if (json == null) return null;
             return new JsonParser().parse(json);
           });
         }));
@@ -1260,10 +1428,13 @@ public class InspectorService implements Disposable {
     }
 
     CompletableFuture<ArrayList<DiagnosticsNode>> parseDiagnosticsNodesVmService(InstanceRef instanceRef, DiagnosticsNode parent) {
+      if (instanceRef == null)  {
+        return CompletableFuture.completedFuture(null);
+      }
       return nullIfDisposed(() -> instanceRefToJson(instanceRef).thenApplyAsync((JsonElement jsonElement) -> {
         return nullValueIfDisposed(() -> {
-          final JsonArray jsonArray = jsonElement != null ? jsonElement.getAsJsonArray() : null;
-          return parseDiagnosticsNodesHelper(jsonArray, parent);
+          if (jsonElement == null || jsonElement.isJsonNull()) return null;
+          return parseDiagnosticsNodesHelper(jsonElement.getAsJsonArray(), parent);
         });
       }));
     }
@@ -1483,6 +1654,8 @@ public class InspectorService implements Disposable {
       if (selection == null || selection.getId() == null) {
         return;
       }
+      service.trackClientSelfTriggeredSelection(selection);
+
       if (useServiceExtensionApi()) {
         handleSetSelectionDaemon(invokeVmServiceExtension("setSelectionById", selection), uiAlreadyUpdated, textEditorUpdated);
       }
@@ -1498,8 +1671,24 @@ public class InspectorService implements Disposable {
       if (location == null) {
         return;
       }
+      // XXX This one doesn't have its own named service method (yet).
+      // UPDATE THE NEW BRANCH AND NAME IT.
+      if (!hasServiceMethod("_getElements")) {
+        getInspectorService()._selectionGroups.cancelNext();
+        handleSetSelectionVmService(setSelectionByLocationPolyfill(location), uiAlreadyUpdated, textEditorUpdated);
+        /*
+        final ObjectGroup selectionGroup = getInspectorService()._selectionGroups.getNext();
+        selectionGroup.safeWhenComplete(getElementsAtLocationPolyfill(location, 1), (elements, error) -> {
+          if (elements == null || elements.isEmpty() ||  error != null || selectionGroup.isDisposed()) return;
+          setSelection(elements.get(0).getValueRef(), uiAlreadyUpdated, textEditorUpdated);
+        });
+        return;
+
+         */
+      }
+
       if (useServiceExtensionApi()) {
-        JsonObject params = new JsonObject();
+        final JsonObject params = new JsonObject();
         addLocationToParams(location, params);
         handleSetSelectionDaemon(invokeVmServiceExtension("setSelectionByLocation", params), uiAlreadyUpdated, textEditorUpdated);
       }
