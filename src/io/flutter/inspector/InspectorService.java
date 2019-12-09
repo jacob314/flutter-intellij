@@ -49,7 +49,6 @@ import java.io.IOException;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
@@ -997,11 +996,11 @@ public class InspectorService implements Disposable {
 
       if (target == null || target.getValueRef() == null) return CompletableFuture.completedFuture(null);
 
-      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getScreenshotTransformedRect") +
+      final String command = InspectorBackport.getInstance().getPolyfillMethod("getScreenshotTransformedRect") +
                              "return WidgetInspectorService.instance._safeJsonEncode(getScreenshotTransformedRect('" +
-                             target.getValueRef().getId() +  "'," +
-                             width +  "," +
-                             height +  "," +
+                             target.getValueRef().getId() + "'," +
+                             width + "," +
+                             height + "," +
                              pixelRatio +
                              ") ?? <String,Object>{});";
 
@@ -1020,7 +1019,7 @@ public class InspectorService implements Disposable {
                                                                                      int width,
                                                                                      int height,
                                                                                      double pixelRatio) {
-      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getScreenshotAtLocation") +
+      final String command = InspectorBackport.getInstance().getPolyfillMethod("getScreenshotAtLocation") +
                              "return WidgetInspectorService.instance._safeJsonEncode(getScreenshotAtLocation(" +
                              Location.toDartExpression(location) + "," +
                              count + "," +
@@ -1048,7 +1047,7 @@ public class InspectorService implements Disposable {
     private CompletableFuture<ArrayList<DiagnosticsNode>> getElementsAtLocationPolyfill(Location location, int count) {
       if (location == null) return CompletableFuture.completedFuture(null);
 
-      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("getElementsAtLocation") +
+      final String command = InspectorBackport.getInstance().getPolyfillMethod("getElementsAtLocation") +
                              "return WidgetInspectorService.instance._safeJsonEncode(getElementsAtLocation(\n" +
                              Location.toDartExpression(location) + "," +
                              count + ",\n" +
@@ -1066,7 +1065,7 @@ public class InspectorService implements Disposable {
                                                                           String file,
                                                                           int startLine,
                                                                           int endLine) {
-      String command = InspectorPolyfills.getInstance().getPolyfillMethod("hitTest") +
+      String command = InspectorBackport.getInstance().getPolyfillMethod("hitTest") +
                        "return WidgetInspectorService.instance._safeJsonEncode(hitTest(\n" +
                        "'" + root.getValueRef() + "',\n";
       if (file != null) {
@@ -1094,7 +1093,7 @@ public class InspectorService implements Disposable {
     private CompletableFuture<InstanceRef> setSelectionByLocationPolyfill(Location location) {
       if (location == null) return CompletableFuture.completedFuture(null);
 
-      final String command = InspectorPolyfills.getInstance().getPolyfillMethod("setSelectionByLocation") +
+      final String command = InspectorBackport.getInstance().getPolyfillMethod("setSelectionByLocation") +
                              "return setSelectionByLocation(\n" +
                              "_Location(file: '" + location.getPath() + "',\n" +
                              "line: " + location.getLine() + ",\n" +

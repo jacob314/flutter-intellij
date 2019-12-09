@@ -368,25 +368,14 @@ Map<String, Object> getScreenshotAtLocation(_Location location, int count, doubl
           : 0;
     }
 
-    Iterable<Element> getActiveElementsForLocation(_Location location,
-        {@required Element closestTo}) {
+    Iterable<Element> getActiveElementsForLocation(_Location location) {
       final List<Element> matches = _getElementsMatchingLocation(
           WidgetsBinding.instance?.renderViewElement, location);
-      if (matches.length > 1 && closestTo != null) {
-        final Map<Element, double> scores = Map<Element, double>.identity();
-        for (Element element in matches) {
-          scores[element] = _scoreElement(element, closestTo);
-        }
-        matches.sort((Element a, Element b) => scores[b].compareTo(scores[a]));
-      }
       return matches;
     }
 
     final Iterable<Element> active = getActiveElementsForLocation(
-        _getCreationLocation(targetElement),
-        closestTo: _isAncestor(targetRenderObject, rootRenderObject)
-            ? targetElement
-            : null);
+        _getCreationLocation(targetElement));
     final List<DiagnosticsNode> nodes = active
         .where((Element element) => _isAncestorElement(element, rootElement))
         .map((Element element) => element.toDiagnosticsNode())
@@ -600,13 +589,13 @@ Map<String, Object> getScreenshotAtLocation(_Location location, int count, doubl
 }
 
 List<Map<String, Object>> hitTest(
-  String id,
-  String file,
-  int startLine,
-  int endLine,
-  Offset offset,
-  String groupName
-) {
+    String id,
+    String file,
+    int startLine,
+    int endLine,
+    Offset offset,
+    String groupName
+    ) {
   final WidgetInspectorService service = WidgetInspectorService.instance;
   List<Map<String, Object>> _getBoundingBoxesHelper(
       Element rootElement, Element targetElement, String groupName) {
@@ -677,8 +666,7 @@ List<Map<String, Object>> hitTest(
 
     bool isAncestorOf(Element element, Element target) {
       bool matches = false;
-      if (element.renderObject?.attached != true ||
-          target.renderObject?.attached != true) {
+      if (element.renderObject?.attached != true || target.renderObject?.attached != true) {
         return false;
       }
       element.visitAncestorElements((Element ancestor) {
@@ -693,19 +681,23 @@ List<Map<String, Object>> hitTest(
 
     double _scoreElement(Element element, Element target) {
       if (identical(element, target)) return double.maxFinite;
-      return (isAncestorOf(element, target) || isAncestorOf(target, element))
-          ? 1
-          : 0;
+      return (isAncestorOf(element, target) || isAncestorOf(target, element)) ? 1 : 0;
     }
 
-    Iterable<Element> getActiveElementsForLocation(_Location location) {
-      final List<Element> matches = _getElementsMatchingLocation(
-          WidgetsBinding.instance?.renderViewElement, location);
+    Iterable<Element> getActiveElementsForLocation(_Location location, Element closestTo) {
+      final List<Element> matches = _getElementsMatchingLocation(WidgetsBinding.instance?.renderViewElement, location);
+      if (matches.length > 1 && closestTo != null) {
+        final Map<Element, double> scores = Map<Element, double>.identity();
+        for (Element element in matches) {
+          scores[element] = _scoreElement(element, closestTo);
+        }
+        matches.sort((Element a, Element b) => scores[b].compareTo(scores[a]));
+      }
       return matches;
     }
 
     final Iterable<Element> active = getActiveElementsForLocation(
-        _getCreationLocation(targetElement));
+        _getCreationLocation(targetElement), _isAncestor(targetRenderObject, rootRenderObject) ? targetElement : null);
     final List<DiagnosticsNode> nodes = active
         .where((Element element) => _isAncestorElement(element, rootElement))
         .map((Element element) => element.toDiagnosticsNode())
@@ -746,109 +738,76 @@ List<Map<String, Object>> hitTest(
     );
   }
 
-  Element _findFirstMatchingElement(RenderObject hit, String file, int startLine, int endLine, Element root) {
-    bool withinRange(Element element) {
-      final _Location location = _getCreationLocation(element);
-      if (file == null) {
-        return _isLocalCreationLocation(location);
-      }
-      return location != null && location.file == file && (startLine == null || location.line >= startLine && location.line <= endLine);
+  bool _hitTestHelper(
+      List<RenderObject> hits,
+      List<RenderObject> edgeHits,
+      Offset position,
+      RenderObject object,
+      Matrix4 transform,
+      ) {
+    bool hit = false;
+    final Matrix4 inverse = Matrix4.tryInvert(transform);
+    if (inverse == null) {
+      // We cannot invert the transform. That means the object doesn't appear on
+      // screen and cannot be hit.
+      return false;
     }
-    Element element = hit.debugCreator.element as Element;
+    final Offset localPosition = MatrixUtils.transformPoint(inverse, position);
 
-    if (withinRange(element)) {
-      return element;
+    final List<DiagnosticsNode> children = object.debugDescribeChildren();
+    for (int i = children.length - 1; i >= 0; i -= 1) {
+      final DiagnosticsNode diagnostics = children[i];
+      assert(diagnostics != null);
+      if (diagnostics.style == DiagnosticsTreeStyle.offstage ||
+          diagnostics.value is! RenderObject)
+        continue;
+      final RenderObject child = diagnostics.value as RenderObject;
+      final Rect paintClip = object.describeApproximatePaintClip(child);
+      if (paintClip != null && !paintClip.contains(localPosition))
+        continue;
+
+      final Matrix4 childTransform = transform.clone();
+      object.applyPaintTransform(child, childTransform);
+      if (_hitTestHelper(hits, edgeHits, position, child, childTransform))
+        hit = true;
     }
-    Element match;
-    element.visitAncestorElements((Element ancestor) {
-      if (withinRange(ancestor)) {
-        match = ancestor;
-        return false;
-      }
-      return !identical(ancestor, root);
-    });
-    return match;
+
+    final Rect bounds = object.semanticBounds;
+    if (bounds.contains(localPosition)) {
+      hit = true;
+      // Hits that occur on the edge of the bounding box of an object are
+      // given priority to provide a way to select objects that would
+      // otherwise be hard to select.
+      if (!bounds.deflate(2.0).contains(localPosition))
+        edgeHits.add(object);
+    }
+    if (hit)
+      hits.add(object);
+    return hit;
   }
 
+  /// Returns the list of render objects located at the given position ordered
+  /// by priority.
+  ///
+  /// All render objects that are not offstage that match the location are
+  /// included in the list of matches. Priority is given to matches that occur
+  /// on the edge of a render object's bounding box and to matches found by
+  /// [RenderBox.hitTest].
   List<RenderObject> _hitTestRenderObject(Offset position, RenderObject root, Matrix4 transform) {
     final List<RenderObject> regularHits = <RenderObject>[];
     final List<RenderObject> edgeHits = <RenderObject>[];
-    bool _hitTestHelper(
-        List<RenderObject> hits,
-        List<RenderObject> edgeHits,
-        Offset position,
-        RenderObject object,
-        Matrix4 transform,
-        ) {
-      bool hit = false;
-      final Matrix4 inverse = Matrix4.tryInvert(transform);
-      if (inverse == null) {
-        return false;
-      }
-      final Offset localPosition = MatrixUtils.transformPoint(inverse, position);
-
-      final List<DiagnosticsNode> children = object.debugDescribeChildren();
-      for (int i = children.length - 1; i >= 0; i -= 1) {
-        final DiagnosticsNode diagnostics = children[i];
-        assert(diagnostics != null);
-        if (diagnostics.style == DiagnosticsTreeStyle.offstage ||
-            diagnostics.value is! RenderObject)
-          continue;
-        final RenderObject child = diagnostics.value as RenderObject;
-        final Rect paintClip = object.describeApproximatePaintClip(child);
-        if (paintClip != null && !paintClip.contains(localPosition))
-          continue;
-
-        final Matrix4 childTransform = transform.clone();
-        object.applyPaintTransform(child, childTransform);
-        if (_hitTestHelper(hits, edgeHits, position, child, childTransform))
-          hit = true;
-      }
-
-      final Rect bounds = object.semanticBounds;
-      if (bounds.contains(localPosition)) {
-        hit = true;
-        if (!bounds.deflate(2.0).contains(localPosition))
-          edgeHits.add(object);
-      }
-      if (hit)
-        hits.add(object);
-      return hit;
-    }
 
     _hitTestHelper(regularHits, edgeHits, position, root, transform);
-    final Map<RenderObject, double> scores = {};
-    for (RenderObject object in regularHits) {
-      Element element = object.debugCreator?.element as Element;
-      double score = 0;
-      if (element != null) {
-        int depthToSummary = 0;
-        int summaryDepth = 0;
-        int depth = 0;
-        Element nearestLocal;
-        if (element?.renderObject?.attached ?? false) {
-          element.visitAncestorElements((Element ancestor) {
-            if (_isLocalCreationLocation(ancestor)) {
-              if (nearestLocal == null) {
-                nearestLocal = ancestor;
-                depthToSummary = depth;
-              }
-              summaryDepth++;
-            }
-            depth++;
-            return true;
-          });
-        }
-        score = summaryDepth.toDouble();
-      }
-      scores[object] = score;
-    }
+    // Order matches by the size of the hit area.
     double _area(RenderObject object) {
       final Size size = object.semanticBounds?.size;
       return size == null ? double.maxFinite : size.width * size.height;
     }
-    regularHits.sort((RenderObject a, RenderObject b) => scores[b].compareTo(scores[a]));
-    return regularHits;
+    regularHits.sort((RenderObject a, RenderObject b) => _area(a).compareTo(_area(b)));
+    final Set<RenderObject> hits = Set<RenderObject>.identity();
+    hits.addAll(edgeHits);
+    hits.addAll(regularHits);
+    return hits.toList();
   }
 
   Element element;
@@ -856,12 +815,8 @@ List<Map<String, Object>> hitTest(
   RenderObject root;
   if (target is Element) {
     root = target.renderObject;
-    final List<RenderObject> hits = _hitTestRenderObject(offset, root, Matrix4.identity());
+    final List<RenderObject> hits = _hitTestRenderObject(offset, root, new Matrix4.identity());
     if (hits.isNotEmpty) {
-      for (RenderObject hit in hits) {
-        element = _findFirstMatchingElement(hit, file, startLine, endLine, target);
-        if (element != null) break;
-      }
       element ??= hits.first.debugCreator.element as Element;
     }
     return _getBoundingBoxesHelper(target, element, groupName);

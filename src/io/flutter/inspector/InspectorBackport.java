@@ -16,10 +16,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-public class InspectorPolyfills {
-  private static final InspectorPolyfills instance = new InspectorPolyfills();
+public class InspectorBackport {
+  private static final InspectorBackport instance = new InspectorBackport();
+  public static final String INSPECTOR_BACKPORT_DART_LIBRARY = "../inspector_backport/lib/inspector_backport.dart";
 
-  public static InspectorPolyfills getInstance() {
+  public static InspectorBackport getInstance() {
     return instance;
   }
 
@@ -27,13 +28,13 @@ public class InspectorPolyfills {
 
   public String getPolyfillMethod(String methodName) {
     // TODO(jacobr): enable cache.
-    final URL resource = getClass().getResource("polyfills/lib/polyfills.dart");
+    final URL resource = getClass().getResource(INSPECTOR_BACKPORT_DART_LIBRARY);
     final byte[] contentBytes;
     try {
       contentBytes = ByteStreams.toByteArray((InputStream)resource.getContent());
     }
     catch (IOException e) {
-      throw new RuntimeException("Unable to load polyfill file");
+      throw new RuntimeException("Unable to load backport library: " + INSPECTOR_BACKPORT_DART_LIBRARY);
     }
     final String content = new String(contentBytes, Charsets.UTF_8);
 
